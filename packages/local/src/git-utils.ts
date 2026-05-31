@@ -1,5 +1,15 @@
 import { execSync } from "node:child_process";
+import { resolve, sep } from "node:path";
 import type { GitStatusResult, GitStatusFile, GitDiffResult } from "./types.js";
+
+function resolveWithin(baseDir: string, targetPath: string): string | null {
+  const resolvedBase = resolve(baseDir);
+  const resolvedTarget = resolve(resolvedBase, targetPath);
+  if (resolvedTarget === resolvedBase || resolvedTarget.startsWith(resolvedBase + sep)) {
+    return resolvedTarget;
+  }
+  return null;
+}
 
 const GIT_TIMEOUT = 5000;
 
@@ -99,15 +109,21 @@ export function getGitDiff(
 ): GitDiffResult {
   const result: GitDiffResult = { projectPath, filePath, diff: "" };
 
+  const safePath = resolveWithin(projectPath, filePath);
+  if (!safePath) {
+    result.error = "路径不合法：文件不在项目目录内";
+    return result;
+  }
+
   if (staged) {
-    const { diff, error } = runGitDiff(`git diff --cached -- "${filePath}"`, projectPath);
+    const { diff, error } = runGitDiff(`git diff --cached -- "${safePath}"`, projectPath);
     result.diff = diff;
     result.error = error;
     return result;
   }
 
   // Unstaged: try git diff first; if file is untracked, compare against /dev/null
-  const { diff, error } = runGitDiff(`git diff -- "${filePath}"`, projectPath);
+  const { diff, error } = runGitDiff(`git diff -- "${safePath}"`, projectPath);
   if (!error && diff) {
     result.diff = diff;
     return result;
@@ -115,7 +131,7 @@ export function getGitDiff(
 
   // If error mentions "bad revision" or no diff returned, treat as untracked
   if (error || !diff) {
-    const absPath = `${projectPath}/${filePath}`.replace(/\\/g, "/");
+    const absPath = safePath.replace(/\\/g, "/");
     // git diff --no-index always exits 1 when files differ
     const untracked = runGitDiff(`git diff --no-index /dev/null "${absPath}"`, projectPath);
     result.diff = untracked.diff;

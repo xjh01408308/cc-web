@@ -15,7 +15,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
-import { RELAY_PORT, STATIC_DIR } from './config.js';
+import { RELAY_PORT, RELAY_BROWSER_TOKEN, STATIC_DIR } from './config.js';
 import { serveStatic } from './static.js';
 import { handleBrowserConnection, handleLocalConnection, requestLocal, getOnlineNodes, isNodePasswordRequired } from './ws-relay.js';
 
@@ -100,7 +100,17 @@ function getClientIp(req: http.IncomingMessage): string {
 
 server.on('upgrade', (req, socket, head) => {
   const ip = getClientIp(req);
-  if (req.url === '/ws/browser') {
+  if (req.url?.startsWith('/ws/browser')) {
+    if (RELAY_BROWSER_TOKEN) {
+      const url = new URL(req.url, 'http://localhost');
+      const token = url.searchParams.get('token');
+      if (token !== RELAY_BROWSER_TOKEN) {
+        console.warn(`[relay] 浏览器 WebSocket 认证失败: token 不匹配 | IP: ${ip}`);
+        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+    }
     browserWss.handleUpgrade(req, socket, head, (ws) => {
       handleBrowserConnection(ws, ip);
     });
@@ -132,4 +142,8 @@ server.listen(RELAY_PORT, () => {
   console.log(`  WebSocket (浏览器): ws://localhost:${RELAY_PORT}/ws/browser`);
   console.log(`  WebSocket (本地服务): ws://localhost:${RELAY_PORT}/ws/local`);
   console.log(`  静态文件目录: ${staticDir}`);
+  if (!RELAY_BROWSER_TOKEN) {
+    console.warn(`  [安全提示] 未设置 RELAY_BROWSER_TOKEN，浏览器 WebSocket 无需认证。`);
+    console.warn(`  建议在生产环境中设置 RELAY_BROWSER_TOKEN 和 VITE_BROWSER_TOKEN。`);
+  }
 });

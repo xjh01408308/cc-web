@@ -23,6 +23,14 @@ const allBrowsers = new Set<WebSocket>();
 // HTTP API 请求-响应匹配
 const pendingRequests = new Map<string, (data: unknown) => void>();
 
+// 浏览器请求-响应匹配（防止响应广播到所有浏览器）
+interface BrowserRequestEntry {
+  ws: WebSocket;
+  timeout: ReturnType<typeof setTimeout>;
+  type: string;
+}
+const browserRequests = new Map<string, BrowserRequestEntry>();
+
 // ---- 工具函数 ----
 
 function send(ws: WebSocket, data: unknown): void {
@@ -44,6 +52,17 @@ function broadcastToAllBrowsers(data: unknown): void {
   for (const ws of allBrowsers) {
     send(ws, data);
   }
+}
+
+function registerBrowserRequest(ws: WebSocket, msgType: string): string {
+  const reqId = randomUUID();
+  const timeout = setTimeout(() => {
+    if (browserRequests.has(reqId)) {
+      browserRequests.delete(reqId);
+    }
+  }, 10000);
+  browserRequests.set(reqId, { ws, timeout, type: msgType });
+  return reqId;
 }
 
 function broadcastNodesList(): void {
@@ -194,7 +213,8 @@ function handleBrowserMessage(ws: WebSocket, msg: BrowserMessage): void {
         send(ws, { type: 'error', error: `节点 ${targetNode} 需要密码认证` });
         return;
       }
-      send(node.ws, { type: 'list_sessions', projectId: msg.projectId });
+      const reqId = registerBrowserRequest(ws, 'list_sessions');
+      send(node.ws, { type: 'list_sessions', projectId: msg.projectId, _reqId: reqId });
       break;
     }
 
@@ -210,7 +230,8 @@ function handleBrowserMessage(ws: WebSocket, msg: BrowserMessage): void {
         send(ws, { type: 'error', error: `节点 ${targetNode} 需要密码认证` });
         return;
       }
-      send(node.ws, { type: 'create_project', name: msg.name, path: msg.path });
+      const reqId = registerBrowserRequest(ws, 'create_project');
+      send(node.ws, { type: 'create_project', name: msg.name, path: msg.path, _reqId: reqId });
       break;
     }
 
@@ -242,7 +263,8 @@ function handleBrowserMessage(ws: WebSocket, msg: BrowserMessage): void {
         send(ws, { type: 'error', error: `节点 ${targetNode} 需要密码认证` });
         return;
       }
-      send(node.ws, { type: 'list_projects' });
+      const reqId = registerBrowserRequest(ws, 'list_projects');
+      send(node.ws, { type: 'list_projects', _reqId: reqId });
       break;
     }
 
@@ -320,7 +342,8 @@ function handleBrowserMessage(ws: WebSocket, msg: BrowserMessage): void {
         send(ws, { type: 'error', error: `节点 ${targetNode} 需要密码认证` });
         return;
       }
-      send(node.ws, { type: 'get_git_status', projectPath: msg.projectPath, projectId: msg.projectId });
+      const reqId = registerBrowserRequest(ws, 'get_git_status');
+      send(node.ws, { type: 'get_git_status', projectPath: msg.projectPath, projectId: msg.projectId, _reqId: reqId });
       break;
     }
 
@@ -336,7 +359,8 @@ function handleBrowserMessage(ws: WebSocket, msg: BrowserMessage): void {
         send(ws, { type: 'error', error: `节点 ${targetNode} 需要密码认证` });
         return;
       }
-      send(node.ws, { type: 'get_git_diff', projectPath: msg.projectPath, filePath: msg.filePath, staged: msg.staged });
+      const reqId = registerBrowserRequest(ws, 'get_git_diff');
+      send(node.ws, { type: 'get_git_diff', projectPath: msg.projectPath, filePath: msg.filePath, staged: msg.staged, _reqId: reqId });
       break;
     }
 
@@ -352,7 +376,8 @@ function handleBrowserMessage(ws: WebSocket, msg: BrowserMessage): void {
         send(ws, { type: 'error', error: `节点 ${targetNode} 需要密码认证` });
         return;
       }
-      send(node.ws, { type: 'get_file_tree', projectPath: msg.projectPath, projectId: msg.projectId });
+      const reqId = registerBrowserRequest(ws, 'get_file_tree');
+      send(node.ws, { type: 'get_file_tree', projectPath: msg.projectPath, projectId: msg.projectId, _reqId: reqId });
       break;
     }
 
@@ -368,7 +393,8 @@ function handleBrowserMessage(ws: WebSocket, msg: BrowserMessage): void {
         send(ws, { type: 'error', error: `节点 ${targetNode} 需要密码认证` });
         return;
       }
-      send(node.ws, { type: 'get_file_content', projectPath: msg.projectPath, filePath: msg.filePath });
+      const reqId = registerBrowserRequest(ws, 'get_file_content');
+      send(node.ws, { type: 'get_file_content', projectPath: msg.projectPath, filePath: msg.filePath, _reqId: reqId });
       break;
     }
   }
@@ -432,6 +458,17 @@ function handleLocalMessage(ws: WebSocket, msg: LocalMessage): void {
     return;
   }
 
+  // 浏览器请求-响应匹配
+  if (reqId && browserRequests.has(reqId)) {
+    const entry = browserRequests.get(reqId)!;
+    clearTimeout(entry.timeout);
+    browserRequests.delete(reqId);
+    const { _reqId: _, ...response } = msg as LocalMessage & Record<string, unknown>;
+    const nodeId = (ws as unknown as Record<string, unknown>)._nodeId as string;
+    send(entry.ws, { ...response, nodeId });
+    return;
+  }
+
   switch (msg.type) {
     case 'register': {
       if (msg.token !== RELAY_TOKEN) {
@@ -482,13 +519,12 @@ function handleLocalMessage(ws: WebSocket, msg: LocalMessage): void {
           ? (msg.data as { type?: string }).type
           : '';
         console.log(`[relay] 收到 ${msg.type}${subType ? '/' + subType : ''} sessionId=${(msg.sessionId || '').substring(0, 8)}, 浏览器数=${msg.sessionId ? (browserSessions.get(msg.sessionId)?.size ?? 0) : 'N/A'}`);
-        // 有订阅者时按 session 转发，否则广播到所有浏览器（处理自动创建的会话）
         const clients = browserSessions.get(msg.sessionId);
         if (clients && clients.size > 0) {
           broadcastToSession(msg.sessionId, msg);
         } else {
           const nodeId = (ws as unknown as Record<string, unknown>)._nodeId as string;
-          broadcastToAllBrowsers({ ...msg, nodeId });
+          console.warn(`[relay] 丢弃无订阅者的会话消息: ${msg.type} sessionId=${msg.sessionId.substring(0, 8)} nodeId=${nodeId}`);
         }
       } else {
         const nodeId = (ws as unknown as Record<string, unknown>)._nodeId as string;
@@ -505,7 +541,8 @@ function handleLocalMessage(ws: WebSocket, msg: LocalMessage): void {
     case 'file_tree':
     case 'file_content': {
       const nodeId = (ws as unknown as Record<string, unknown>)._nodeId as string;
-      broadcastToAllBrowsers({ ...msg, nodeId });
+      const { _reqId: _, ...broadcastMsg } = msg as LocalMessage & Record<string, unknown>;
+      broadcastToAllBrowsers({ ...broadcastMsg, nodeId });
       break;
     }
   }
@@ -544,6 +581,12 @@ export function handleBrowserConnection(ws: WebSocket, ip: string): void {
     authenticatedBrowsers.delete(ws);
     for (const [, clients] of browserSessions) {
       clients.delete(ws);
+    }
+    for (const [reqId, entry] of browserRequests) {
+      if (entry.ws === ws) {
+        clearTimeout(entry.timeout);
+        browserRequests.delete(reqId);
+      }
     }
     console.log(`[relay] 浏览器已断开 | IP: ${ip} | 持续: ${duration} | closeCode: ${code} | 在线: ${allBrowsers.size}`);
   });

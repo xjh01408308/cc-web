@@ -1,6 +1,15 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import type { FileTreeNode, FileTreeResult, FileContentResult } from "./types.js";
+
+export function resolveWithin(baseDir: string, targetPath: string): string | null {
+  const resolvedBase = resolve(baseDir);
+  const resolvedTarget = resolve(resolvedBase, targetPath);
+  if (resolvedTarget === resolvedBase || resolvedTarget.startsWith(resolvedBase + sep)) {
+    return resolvedTarget;
+  }
+  return null;
+}
 
 const SKIP_PATTERNS = [
   ".git",
@@ -87,8 +96,13 @@ export function getFileTree(
     projectId,
     tree: [],
   };
+  const safeBase = resolveWithin(projectPath, ".");
+  if (!safeBase) {
+    result.error = `项目路径 "${projectPath}" 不合法`;
+    return result;
+  }
   try {
-    result.tree = readDirRecursive(projectPath, "", 0);
+    result.tree = readDirRecursive(safeBase, "", 0);
   } catch (err) {
     result.error = (err as Error).message;
   }
@@ -144,7 +158,10 @@ export function getFileContent(
     return { projectPath, filePath, content: "", mimeType: "binary" };
   }
 
-  const absPath = join(projectPath, filePath);
+  const absPath = resolveWithin(projectPath, filePath);
+  if (!absPath) {
+    return { projectPath, filePath, content: "", mimeType: "text", error: "路径不合法：文件不在项目目录内" };
+  }
 
   try {
     const stat = statSync(absPath);
