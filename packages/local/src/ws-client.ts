@@ -1,4 +1,5 @@
 import { WebSocket } from 'ws';
+import https from 'node:https';
 import { RELAY_URL, RELAY_TOKEN, NODE_ID, NODE_PASSWORD, RECONNECT_DELAY, MAX_RECONNECT_DELAY } from './config.js';
 
 type MessageHandler = (msg: { type: string; [key: string]: unknown }) => void;
@@ -43,7 +44,8 @@ function connect(): void {
   reconnectAttempt++;
   console.log(`[ws-client] 第 ${reconnectAttempt} 次连接尝试 → ${RELAY_URL}`);
 
-  ws = new WebSocket(RELAY_URL);
+  const isSecure = RELAY_URL.startsWith('wss://');
+  ws = new WebSocket(RELAY_URL, isSecure ? { rejectUnauthorized: false } : undefined);
 
   ws.on('open', () => {
     connectTime = new Date();

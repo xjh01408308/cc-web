@@ -1,0 +1,78 @@
+# cc-web nginx 反向代理配置
+# 使用方法:
+#   1. 将此文件复制到 /etc/nginx/conf.d/cc-web.conf
+#   2. 替换 your-domain.com 为你的实际域名
+#   3. 配置 TLS 证书（推荐 Let's Encrypt）:
+#      sudo apt install certbot python3-certbot-nginx
+#      sudo certbot --nginx -d your-domain.com
+#   4. nginx -t && sudo systemctl reload nginx
+
+# HTTP → HTTPS 重定向
+server {
+    listen 80;
+    server_name your-domain.com;
+    return 301 https://$host$request_uri;
+}
+
+# HTTPS 主配置
+server {
+    listen 443 ssl http2;
+    server_name your-domain.com;
+
+    # TLS 证书路径
+    # 方式一（有域名）：Let's Encrypt，路径为 /etc/letsencrypt/live/your-domain.com/fullchain.pem
+    # 方式二（无域名）：自签名证书，按下面命令生成后使用此路径：
+    #   sudo mkdir -p /etc/nginx/ssl
+    #   sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+    #     -keyout /etc/nginx/ssl/cc-web.key -out /etc/nginx/ssl/cc-web.crt \
+    #     -subj "/CN=your-domain.com"
+    ssl_certificate     /etc/nginx/ssl/cc-web.crt;
+    ssl_certificate_key /etc/nginx/ssl/cc-web.key;
+
+    # TLS 安全参数
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
+
+    # 静态文件 & API
+    location / {
+        proxy_pass http://127.0.0.1:3001;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # 浏览器 WebSocket（公网可访问）
+    location /ws/browser {
+        proxy_pass http://127.0.0.1:3001;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # WebSocket 超时（relay 自有心跳 30s，这里设 24h）
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+    }
+
+    # 本地服务 WebSocket
+    # 同机器部署时不需要此段（local 直连 ws://127.0.0.1:3001/ws/local）
+    # 远程节点部署时必须启用此段:
+    location /ws/local {
+        proxy_pass http://127.0.0.1:3001;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+    }
+}

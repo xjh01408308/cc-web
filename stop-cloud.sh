@@ -5,7 +5,7 @@ PID_DIR="$SCRIPT_DIR/.pids"
 
 stopped=0
 
-for name in relay frontend; do
+for name in relay; do
     pid_file="$PID_DIR/$name.pid"
     if [ -f "$pid_file" ]; then
         pid=$(cat "$pid_file")
@@ -19,7 +19,7 @@ for name in relay frontend; do
 done
 
 # 兜底：清理占用端口的残留进程
-for port in 3001 5173; do
+for port in 3001; do
     pid=$(lsof -ti ":$port" 2>/dev/null || true)
     if [ -n "$pid" ]; then
         echo "关闭占用端口 $port 的残留进程 PID=$pid"

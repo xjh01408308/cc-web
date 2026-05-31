@@ -143,7 +143,7 @@ function shutdown() {
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
-server.listen(RELAY_PORT, () => {
+server.listen(RELAY_PORT, '127.0.0.1', () => {
   console.log(`cc-web relay 已启动: http://localhost:${RELAY_PORT}`);
   console.log(`  WebSocket (浏览器): ws://localhost:${RELAY_PORT}/ws/browser`);
   console.log(`  WebSocket (本地服务): ws://localhost:${RELAY_PORT}/ws/local`);

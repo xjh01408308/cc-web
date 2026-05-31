@@ -8,20 +8,22 @@
 
 ```
 浏览器 (React SPA)          中继服务 (ws)             本地节点集群
-┌──────────────────┐  ws   ┌──────────────┐  ws   ┌──────────────────┐
+┌──────────────────┐  wss  ┌──────────────┐  ws   ┌──────────────────┐
 │ ChatMessages     │◄─────►│ 静态文件服务  │◄─────►│ 节点 A (开发机)   │
 │ MessageComponents│       │ WS 转发/路由  │       │ SessionManager   │
 │ useStreamParser  │       │ 会话路由表    │       │ Claude CLI 子进程 │
 │ ProjectSidebar   │       │ 节点注册表    │       ├──────────────────┤
 │ - 项目下拉选择器  │       │              │  ws   │ 节点 B (笔记本)   │
-│ - 会话列表       │       └──────────────┘ ◄─────│ SessionManager   │
-│ - Git 变更列表   │              ▲         ws   │ Claude CLI 子进程 │
+│ - 会话列表       │       └──────┬───────┘ ◄─────│ SessionManager   │
+│ - Git 变更列表   │              │         ws   │ Claude CLI 子进程 │
 │ - 文件系统树     │              │               ├──────────────────┤
-│ FileViewerModal  │              │               │ 节点 C (服务器)   │
-│ GitDiffModal     │              └───────────────│ SessionManager   │
+│ FileViewerModal  │         nginx (TLS)          │ 节点 C (服务器)   │
+│ GitDiffModal     │         443 → 3001           │ SessionManager   │
 └──────────────────┘                              │ Claude CLI 子进程 │
                                                   └──────────────────┘
 ```
+
+> 生产部署时，nginx 终止 TLS（HTTPS/WSS），relay 仅监听 `127.0.0.1:3001`，不对外暴露。
 
 ## 功能特性
 
@@ -51,10 +53,10 @@
 ```
 一体机 (restart.sh)          云服务 (restart-cloud.sh)      本地节点 (restart-local.sh)
 ┌──────────────────┐       ┌──────────────────┐         ┌──────────────────┐
-│ relay :3001      │       │ relay :3001      │         │                  │
-│ local (WS客户端)  │       │ frontend :5173   │   ws    │ local (WS客户端)  │
-│ frontend :5173   │       └──────────────────┘ ◄─────── │                  │
-└──────────────────┘               ▲                      └──────────────────┘
+│ relay :3001      │       │ nginx :443 (TLS) │         │                  │
+│ local (WS客户端)  │       │ relay :3001      │   wss   │ local (WS客户端)  │
+│ frontend :5173   │       │ (仅127.0.0.1)    │ ◄─────── │                  │
+└──────────────────┘       └──────────────────┘         └──────────────────┘
      本地开发/演示                  │ 公网服务器                   远程开发机
                                    │
                           RELAY_URL 指向云服务
@@ -81,15 +83,22 @@ cp .env.example .env
 ```bash
 # ----- 中继服务 (packages/relay) -----
 RELAY_PORT=3001                 # 监听端口
-RELAY_TOKEN=dev-token           # 本地服务注册认证 token
+RELAY_TOKEN=<随机字符串>         # 本地服务注册认证 token（生产必须修改）
+RELAY_BROWSER_TOKEN=<随机字符串> # 浏览器 WebSocket 认证 token（生产必须设置）
 STATIC_DIR=../../frontend/dist  # 前端静态文件路径
 
 # ----- 本地服务 (packages/local) -----
-RELAY_URL=ws://localhost:3001/ws/local  # 中转 WebSocket 地址
+# 同机器部署（推荐）: ws://127.0.0.1:3001/ws/local
+# 跨机器部署（需 nginx 代理 WSS）: wss://your-domain.com/ws/local
+RELAY_URL=ws://127.0.0.1:3001/ws/local
 NODE_ID=                    # 节点标识（留空自动取 hostname）
 NODE_PASSWORD=              # 节点登录密码（留空不启用认证）
 RECONNECT_DELAY=2000        # 重连初始延迟（毫秒）
 MAX_RECONNECT_DELAY=30000   # 重连最大延迟（毫秒）
+
+# ----- 前端 (packages/frontend) -----
+VITE_BROWSER_TOKEN=<与 RELAY_BROWSER_TOKEN 一致>  # 浏览器 WebSocket token
+# VITE_WS_URL 留空即可，前端会根据页面协议自动选择 ws/wss
 ```
 
 ### 一体机（本地开发 / 演示）
@@ -109,16 +118,42 @@ restart.bat
 **云服务器上**（启动 relay + frontend）：
 
 ```bash
-# 1. 修改 .env 中的 RELAY_TOKEN 为安全随机值
-# 2. 启动
+# 1. 配置 .env
+#    NODE_ENV=production
+#    RELAY_TOKEN=<强随机字符串>
+#    RELAY_BROWSER_TOKEN=<强随机字符串>
+#    VITE_BROWSER_TOKEN=<同上>
+#    RELAY_URL=ws://127.0.0.1:3001/ws/local  (local 和 relay 同机器时)
+
+# 2. 构建前端 & 启动
+npm run build:frontend
 ./restart-cloud.sh
 ```
+
+**配置 nginx + HTTPS（生产必须）**：
+
+```bash
+# 1. 复制项目自带的 nginx 配置模板
+sudo cp nginx.conf.example /etc/nginx/conf.d/cc-web.conf
+
+# 2. 编辑配置，替换 your-domain.com 为实际域名
+sudo nano /etc/nginx/conf.d/cc-web.conf
+
+# 3. 申请 TLS 证书（Let's Encrypt）
+sudo apt install certbot python3-certbot-nginx
+sudo certbot --nginx -d your-domain.com
+
+# 4. 测试并重载 nginx
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+> 完整的 nginx 配置参见 `nginx.conf.example`，包含 TLS 参数、WebSocket 代理、`/ws/local` IP 白名单等。
 
 **远程开发机上**（仅启动 local，连到云服务）：
 
 ```bash
 # 1. 修改 .env：
-#    RELAY_URL=ws://你的云服务器IP:3001/ws/local
+#    RELAY_URL=wss://your-domain.com/ws/local  (跨机器必须走 WSS)
 #    RELAY_TOKEN=与云服务一致的值
 # 2. 启动
 ./restart-local.sh
@@ -195,6 +230,16 @@ cc-web/
 - **中转 ↔ 本地** (`/ws/local`)：认证注册 + 双向转发
 - **数据消息**：`{ type: "claude_json", data: <SDKMessage> }` 格式，与 claude-code-webui 完全兼容
 
+生产部署时通过 nginx 反向代理提供 HTTPS/WSS 加密：
+
+```
+浏览器 ──(HTTPS/WSS)──→ nginx:443 ──(HTTP/WS)──→ relay:127.0.0.1:3001
+                                       ↑
+本地服务 ──(WSS)────────→ nginx:443 ──┘   (同机器可直连 ws://127.0.0.1:3001)
+```
+
+前端根据 `window.location.protocol` 自动选择 `ws://` 或 `wss://`，无需额外配置。
+
 ### 复用 claude-code-webui
 
 前端消息处理管线直接复用 [claude-code-webui](https://github.com/sugyan/claude-code-webui)：
@@ -233,11 +278,13 @@ data/sessions/
 
 ### 安全
 
-- 中转 ↔ 本地：预共享 token 认证 (`RELAY_TOKEN`)
-- 浏览器 ↔ 节点：可选密码认证 (`NODE_PASSWORD`)，选中需密码的节点时前端弹出密码输入框，验证通过后才能访问项目/会话
-- 节点列表接口无需认证，始终公开
-- 静态文件服务：路径穿越防护
-- 本地服务：不暴露任何端口，仅作 WS 客户端
+- **传输加密**：生产部署通过 nginx 提供 HTTPS/WSS（`nginx.conf.example`），relay 仅监听 `127.0.0.1` 不对外暴露
+- **认证机制**：
+  - 中转 ↔ 本地：预共享 token 认证 (`RELAY_TOKEN`)，生产模式禁止使用默认值
+  - 浏览器 ↔ 中转：token 认证 (`RELAY_BROWSER_TOKEN`)，生产模式必须设置
+  - 浏览器 ↔ 节点：可选密码认证 (`NODE_PASSWORD`)
+- **路径安全**：静态文件服务路径穿越防护，API 端点路径白名单
+- **部署安全**：本地服务不暴露端口，仅作 WS 客户端
 
 ## 技术栈
 
@@ -256,24 +303,32 @@ data/sessions/
 ```bash
 # 1. 上传整个项目（或至少 packages/relay + packages/frontend + .env + restart-cloud.sh）
 
-# 2. 修改 .env
-#    RELAY_TOKEN=your-secure-random-token
+# 2. 配置 .env
+#    NODE_ENV=production
+#    RELAY_TOKEN=<强随机字符串>
+#    RELAY_BROWSER_TOKEN=<强随机字符串>
+#    VITE_BROWSER_TOKEN=<同上>
 #    RELAY_PORT=3001
 
-# 3. 安装依赖 & 启动
+# 3. 安装依赖、构建前端、启动
 npm install
+npm run build:frontend
 ./restart-cloud.sh
 
-# 4. 配置 nginx 反代（HTTPS + wss）
-# proxy_pass http://127.0.0.1:3001
-# 需配置 Upgrade/Connection 头以支持 WebSocket
+# 4. 配置 nginx + HTTPS（详见 nginx.conf.example）
+sudo cp nginx.conf.example /etc/nginx/conf.d/cc-web.conf
+# 编辑配置替换域名后：
+sudo certbot --nginx -d your-domain.com
+sudo nginx -t && sudo systemctl reload nginx
 ```
 
 本地节点只需项目文件和 `restart-local.sh`：
 
 ```bash
 # 本地开发机上
-# 1. 修改 .env：RELAY_URL=ws://<云服务器IP>:3001/ws/local，RELAY_TOKEN 与云服务一致
+# 1. 修改 .env：
+#    RELAY_URL=wss://your-domain.com/ws/local  (跨机器走 WSS)
+#    RELAY_TOKEN=与云服务一致的值
 # 2. 确保已安装 claude CLI 并可用
 npm install
 ./restart-local.sh
