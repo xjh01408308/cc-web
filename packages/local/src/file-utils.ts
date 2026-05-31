@@ -11,6 +11,14 @@ export function resolveWithin(baseDir: string, targetPath: string): string | nul
   return null;
 }
 
+export function validateProjectPath(projectPath: string, workspaceRoot: string): string | null {
+  if (!workspaceRoot) return null;
+  if (!resolveWithin(workspaceRoot, projectPath)) {
+    return `项目路径必须在 WORKSPACE_ROOT (${workspaceRoot}) 目录内`;
+  }
+  return null;
+}
+
 const SKIP_PATTERNS = [
   ".git",
   "node_modules",

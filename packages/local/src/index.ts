@@ -12,7 +12,7 @@ console.error = (...args: unknown[]) => _error(`[${ts()}]`, ...args);
 console.warn = (...args: unknown[]) => _warn(`[${ts()}]`, ...args);
 
 import { start, onMessage, send } from './ws-client.js';
-import { NODE_PASSWORD, NODE_ID, FORCE_PERMISSION_MODE } from './config.js';
+import { NODE_PASSWORD, NODE_ID, FORCE_PERMISSION_MODE, isDevMode, isNodePasswordEmpty, WORKSPACE_ROOT } from './config.js';
 import {
   createSession,
   sendMessage,
@@ -99,12 +99,15 @@ onMessage((msg) => {
         reply({ type: 'error', error: '项目路径不能为空' });
         return;
       }
-      const project = createProject(name, projectPath);
-      console.log(`项目已创建: ${project.name} (${project.projectId.substring(0, 8)})`);
-      reply({ type: 'project_info', project });
-      // 同时广播项目列表（不通过 reply，避免 _reqId 污染广播）
-      const projects = listProjects();
-      send({ type: 'projects_list', projects });
+      try {
+        const project = createProject(name, projectPath);
+        console.log(`项目已创建: ${project.name} (${project.projectId.substring(0, 8)})`);
+        reply({ type: 'project_info', project });
+        const projects = listProjects();
+        send({ type: 'projects_list', projects });
+      } catch (err) {
+        reply({ type: 'error', error: (err as Error).message });
+      }
       break;
     }
 
@@ -244,6 +247,20 @@ onMessage((msg) => {
 });
 
 console.log('cc-web 本地服务已启动');
+
+if (isDevMode()) {
+  console.warn('════════════════════════════════════════════════════════');
+  console.warn('  [DEV MODE] 开发模式 (NODE_ENV != "production")');
+  if (isNodePasswordEmpty()) {
+    console.warn('  [INSECURE] NODE_PASSWORD 为空 — 无需密码认证即可执行命令');
+  }
+  if (!WORKSPACE_ROOT) {
+    console.warn('  [INSECURE] WORKSPACE_ROOT 为空 — 任意路径均可作为项目目录');
+  }
+  console.warn('  公网部署时请设置 NODE_ENV=production 并配置密码和工作区');
+  console.warn('════════════════════════════════════════════════════════');
+}
+
 start();
 
 // 优雅退出

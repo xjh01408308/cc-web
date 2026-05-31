@@ -1,6 +1,6 @@
 import { WebSocket } from 'ws';
 import { randomUUID } from 'node:crypto';
-import { RELAY_TOKEN } from './config.js';
+import { RELAY_TOKEN, isDevMode, isUsingDefaultRelayToken } from './config.js';
 import type { BrowserMessage, LocalMessage } from './types.js';
 
 // ---- 多节点数据结构 ----
@@ -51,6 +51,15 @@ function broadcastToSession(sessionId: string, data: unknown): void {
 function broadcastToAllBrowsers(data: unknown): void {
   for (const ws of allBrowsers) {
     send(ws, data);
+  }
+}
+
+function broadcastToNodeBrowsers(nodeId: string, data: unknown): void {
+  for (const ws of allBrowsers) {
+    const selectedNode = browserNodeMap.get(ws);
+    if (!selectedNode || selectedNode === nodeId) {
+      send(ws, data);
+    }
   }
 }
 
@@ -471,18 +480,28 @@ function handleLocalMessage(ws: WebSocket, msg: LocalMessage): void {
 
   switch (msg.type) {
     case 'register': {
+      const ip = (ws as unknown as Record<string, unknown>)._ip as string || '?';
+      if (!isDevMode() && isUsingDefaultRelayToken()) {
+        console.error(`[relay] 生产模式拒绝默认 token 注册 | IP: ${ip} | nodeId: ${msg.nodeId || 'unknown'}`);
+        send(ws, { type: 'error', error: '认证失败：生产环境下不允许使用默认 token，请设置 RELAY_TOKEN' });
+        ws.close();
+        return;
+      }
       if (msg.token !== RELAY_TOKEN) {
-        const ip = (ws as unknown as Record<string, unknown>)._ip as string || '?';
         console.warn(`[relay] 节点注册认证失败: token 不匹配 | IP: ${ip} | 声称 nodeId: ${msg.nodeId || 'unknown'}`);
         send(ws, { type: 'error', error: '认证失败：token 不匹配' });
         ws.close();
         return;
       }
       const nodeId = msg.nodeId || 'unknown';
-      const ip = (ws as unknown as Record<string, unknown>)._ip as string || '?';
       // 同 nodeId 重连：替换旧连接
       if (localNodes.has(nodeId)) {
-        const oldStart = (localNodes.get(nodeId)!.ws as unknown as Record<string, unknown>)._connectedAt as number;
+        const oldNode = localNodes.get(nodeId)!;
+        const oldIp = (oldNode.ws as unknown as Record<string, unknown>)._ip as string || '?';
+        if (oldIp !== ip) {
+          console.error(`[SECURITY] 节点 ${nodeId} 从不同 IP 重连: ${oldIp} -> ${ip}，可能存在接管风险`);
+        }
+        const oldStart = (oldNode.ws as unknown as Record<string, unknown>)._connectedAt as number;
         const oldDuration = oldStart ? `${((Date.now() - oldStart) / 1000).toFixed(1)}s` : '?';
         console.log(`[relay] 节点 ${nodeId} 重连，替换旧连接 | IP: ${ip} | 旧连接持续: ${oldDuration}`);
         localNodes.get(nodeId)!.ws.close();
@@ -502,9 +521,10 @@ function handleLocalMessage(ws: WebSocket, msg: LocalMessage): void {
     case 'session_info': {
       if (msg.sessionId) {
         const nodeId = (ws as unknown as Record<string, unknown>)._nodeId as string;
-        if (nodeId) sessionNodeMap.set(msg.sessionId, nodeId);
-        // 附带 nodeId 广播
-        broadcastToAllBrowsers({ ...msg, nodeId });
+        if (nodeId) {
+          sessionNodeMap.set(msg.sessionId, nodeId);
+          broadcastToNodeBrowsers(nodeId, { ...msg, nodeId });
+        }
       }
       break;
     }
@@ -541,8 +561,9 @@ function handleLocalMessage(ws: WebSocket, msg: LocalMessage): void {
     case 'file_tree':
     case 'file_content': {
       const nodeId = (ws as unknown as Record<string, unknown>)._nodeId as string;
+      if (!nodeId) break;
       const { _reqId: _, ...broadcastMsg } = msg as LocalMessage & Record<string, unknown>;
-      broadcastToAllBrowsers({ ...broadcastMsg, nodeId });
+      broadcastToNodeBrowsers(nodeId, { ...broadcastMsg, nodeId });
       break;
     }
   }

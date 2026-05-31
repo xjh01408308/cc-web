@@ -5,6 +5,8 @@ import { SessionRunner } from './sdk-runner.js';
 import type { StreamResponse, SessionInfo, ProjectInfo } from './types.js';
 import { send, isConnected } from './ws-client.js';
 import * as db from './db.js';
+import { validateProjectPath } from './file-utils.js';
+import { WORKSPACE_ROOT } from './config.js';
 
 interface Session {
   sessionId: string;
@@ -62,6 +64,8 @@ function loadMessages(sessionId: string): StreamResponse[] {
 // ─── Project API ──────────────────────────────────────────
 
 export function createProject(name: string, projectPath: string): ProjectInfo {
+  const pathError = validateProjectPath(projectPath, WORKSPACE_ROOT);
+  if (pathError) throw new Error(pathError);
   const id = randomUUID();
   const row = db.createProject(id, name, projectPath);
   return {

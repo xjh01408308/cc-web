@@ -15,7 +15,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
-import { RELAY_PORT, RELAY_BROWSER_TOKEN, STATIC_DIR } from './config.js';
+import { RELAY_PORT, RELAY_BROWSER_TOKEN, STATIC_DIR, isDevMode, isUsingDefaultRelayToken } from './config.js';
 import { serveStatic } from './static.js';
 import { handleBrowserConnection, handleLocalConnection, requestLocal, getOnlineNodes, isNodePasswordRequired } from './ws-relay.js';
 
@@ -101,6 +101,12 @@ function getClientIp(req: http.IncomingMessage): string {
 server.on('upgrade', (req, socket, head) => {
   const ip = getClientIp(req);
   if (req.url?.startsWith('/ws/browser')) {
+    if (!isDevMode() && !RELAY_BROWSER_TOKEN) {
+      console.error(`[relay] 生产模式下 RELAY_BROWSER_TOKEN 未设置，拒绝浏览器连接 | IP: ${ip}`);
+      socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n');
+      socket.destroy();
+      return;
+    }
     if (RELAY_BROWSER_TOKEN) {
       const url = new URL(req.url, 'http://localhost');
       const token = url.searchParams.get('token');
@@ -142,8 +148,16 @@ server.listen(RELAY_PORT, () => {
   console.log(`  WebSocket (浏览器): ws://localhost:${RELAY_PORT}/ws/browser`);
   console.log(`  WebSocket (本地服务): ws://localhost:${RELAY_PORT}/ws/local`);
   console.log(`  静态文件目录: ${staticDir}`);
-  if (!RELAY_BROWSER_TOKEN) {
-    console.warn(`  [安全提示] 未设置 RELAY_BROWSER_TOKEN，浏览器 WebSocket 无需认证。`);
-    console.warn(`  建议在生产环境中设置 RELAY_BROWSER_TOKEN 和 VITE_BROWSER_TOKEN。`);
+  if (isDevMode()) {
+    console.warn('════════════════════════════════════════════════════════');
+    console.warn('  [DEV MODE] 开发模式 (NODE_ENV != "production")');
+    if (!RELAY_BROWSER_TOKEN) {
+      console.warn('  [INSECURE] RELAY_BROWSER_TOKEN 为空 — 浏览器 WebSocket 无需认证');
+    }
+    if (isUsingDefaultRelayToken()) {
+      console.warn('  [INSECURE] RELAY_TOKEN 使用默认值 "dev-token" — 节点注册不安全');
+    }
+    console.warn('  公网部署时请设置 NODE_ENV=production 并配置所有 token');
+    console.warn('════════════════════════════════════════════════════════');
   }
 });
