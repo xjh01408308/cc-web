@@ -142,25 +142,43 @@ onMessage((msg) => {
         reply({ type: 'error', error: '创建会话需要指定 projectPath' });
         return;
       }
-      const info = createSession(projectId, projectPath, model, permissionMode);
-      console.log(`会话已创建: ${info.sessionId.substring(0, 8)} (${projectPath})${model ? `, 模型=${model}` : ""}${permissionMode ? `, 权限=${permissionMode}` : ""}`);
-      send({ type: 'session_info', ...info });
-      const projects = listProjects();
-      send({ type: 'projects_list', projects });
+      try {
+        const info = createSession(projectId, projectPath, model, permissionMode);
+        console.log(`会话已创建: ${info.sessionId.substring(0, 8)} (${projectPath})${model ? `, 模型=${model}` : ""}${permissionMode ? `, 权限=${permissionMode}` : ""}`);
+        send({ type: 'session_info', ...info });
+        const projects = listProjects();
+        send({ type: 'projects_list', projects });
+      } catch (err) {
+        reply({ type: 'error', error: (err as Error).message });
+      }
       break;
     }
 
     case 'change_permission_mode': {
       const sid = msg.sessionId as string;
       const permMode = FORCE_PERMISSION_MODE || (msg.permissionMode as string);
-      if (sid && permMode) switchPermissionMode(sid, permMode);
+      if (sid && permMode) {
+        if (permMode === 'bypassPermissions' && !FORCE_PERMISSION_MODE && !isDevMode()) {
+          console.error(`[SECURITY] 拒绝远程 bypassPermissions | sessionId=${sid.substring(0, 8)}`);
+          reply({ type: 'error', error: '生产环境不允许远程设置全权限模式' });
+          break;
+        }
+        switchPermissionMode(sid, permMode);
+      }
       break;
     }
 
     case 'retry_with_permission': {
       const sid = msg.sessionId as string;
       const permMode = FORCE_PERMISSION_MODE || (msg.permissionMode as string) || "bypassPermissions";
-      if (sid) retryWithPermission(sid, permMode);
+      if (sid) {
+        if (permMode === 'bypassPermissions' && !FORCE_PERMISSION_MODE && !isDevMode()) {
+          console.error(`[SECURITY] 拒绝远程 retry bypassPermissions | sessionId=${sid.substring(0, 8)}`);
+          reply({ type: 'error', error: '生产环境不允许远程全权限重试' });
+          break;
+        }
+        retryWithPermission(sid, permMode);
+      }
       break;
     }
 

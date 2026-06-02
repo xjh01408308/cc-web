@@ -1,5 +1,6 @@
 import { WebSocket } from 'ws';
-import { RELAY_URL, RELAY_TOKEN, NODE_ID, NODE_PASSWORD, RECONNECT_DELAY, MAX_RECONNECT_DELAY } from './config.js';
+import { readFileSync } from 'node:fs';
+import { RELAY_URL, RELAY_TOKEN, NODE_ID, NODE_PASSWORD, RECONNECT_DELAY, MAX_RECONNECT_DELAY, RELAY_CA_CERT } from './config.js';
 
 type MessageHandler = (msg: { type: string; [key: string]: unknown }) => void;
 
@@ -43,7 +44,11 @@ function connect(): void {
   reconnectAttempt++;
   console.log(`[ws-client] 第 ${reconnectAttempt} 次连接尝试 → ${RELAY_URL}`);
 
-  ws = new WebSocket(RELAY_URL);
+  const opts: { ca?: Buffer } = {};
+  if (RELAY_CA_CERT) {
+    opts.ca = readFileSync(RELAY_CA_CERT);
+  }
+  ws = new WebSocket(RELAY_URL, opts);
 
   ws.on('open', () => {
     connectTime = new Date();

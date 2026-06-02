@@ -52,8 +52,58 @@ function useIsMobile() {
 }
 
 export function ChatView() {
-  const { connected, send, onRawMessage } = useWebSocket();
+  // ---- 登录状态 ----
+  const [sessionToken, setSessionToken] = useState<string | null>(null);
+  const [loginPassword, setLoginPassword] = useState("");
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [loginLoading, setLoginLoading] = useState(false);
+
+  const { connected, send, onRawMessage } = useWebSocket(sessionToken);
   const { processStreamLine } = useClaudeStreaming();
+
+  // 自动登录（开发模式下 relay 无密码时）
+  useEffect(() => {
+    (async () => {
+      try {
+        const resp = await fetch("/api/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ password: "" }),
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data.token) setSessionToken(data.token);
+        }
+      } catch { /* 登录失败不处理，用户手动登录 */ }
+    })();
+  }, []);
+
+  const handleLogin = useCallback(async () => {
+    setLoginLoading(true);
+    setLoginError(null);
+    try {
+      const resp = await fetch("/api/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: loginPassword }),
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        setSessionToken(data.token);
+      } else {
+        const data = await resp.json();
+        setLoginError(data.error || "登录失败");
+      }
+    } catch {
+      setLoginError("网络错误");
+    } finally {
+      setLoginLoading(false);
+    }
+  }, [loginPassword]);
+
+  const handleLogout = useCallback(() => {
+    setSessionToken(null);
+  }, []);
 
   const isMobile = useIsMobile();
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -1030,6 +1080,41 @@ export function ChatView() {
     },
     [send, activeNodeId],
   );
+
+  // 未登录时显示登录表单
+  if (!sessionToken) {
+    return (
+      <div className="flex h-full items-center justify-center bg-slate-50 dark:bg-slate-900">
+        <div className="w-full max-w-sm p-8">
+          <div className="mb-6 text-center">
+            <h1 className="text-2xl font-bold text-slate-800 dark:text-slate-100">cc-web</h1>
+            <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">请输入访问密码</p>
+          </div>
+          <div className="space-y-4">
+            <input
+              type="password"
+              value={loginPassword}
+              onChange={(e) => setLoginPassword(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleLogin()}
+              placeholder="访问密码"
+              className="w-full rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm text-slate-800 placeholder-slate-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 dark:placeholder-slate-500 dark:focus:border-blue-400 dark:focus:ring-blue-400"
+              autoFocus
+            />
+            {loginError && (
+              <p className="text-sm text-red-500">{loginError}</p>
+            )}
+            <button
+              onClick={handleLogin}
+              disabled={loginLoading}
+              className="w-full rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50 dark:bg-blue-500 dark:hover:bg-blue-600 dark:focus:ring-offset-slate-900"
+            >
+              {loginLoading ? "登录中..." : "登录"}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-full gap-0 relative">

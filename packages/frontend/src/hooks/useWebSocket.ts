@@ -1,5 +1,5 @@
 import { useEffect, useRef, useCallback, useState } from "react";
-import { WS_BROWSER_URL } from "../config/ws";
+import { getWsUrl } from "../config/ws";
 
 interface UseWebSocketReturn {
   connected: boolean;
@@ -7,7 +7,7 @@ interface UseWebSocketReturn {
   onRawMessage: (cb: (raw: string) => void) => void;
 }
 
-export function useWebSocket(): UseWebSocketReturn {
+export function useWebSocket(sessionToken: string | null): UseWebSocketReturn {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectDelay = useRef(2000);
@@ -25,7 +25,8 @@ export function useWebSocket(): UseWebSocketReturn {
     if (!mounted.current) return;
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
-    const ws = new WebSocket(WS_BROWSER_URL);
+    const url = getWsUrl(sessionToken);
+    const ws = new WebSocket(url);
 
     ws.onopen = () => {
       if (!mounted.current) return;
@@ -65,7 +66,7 @@ export function useWebSocket(): UseWebSocketReturn {
     };
 
     wsRef.current = ws;
-  }, []);
+  }, [sessionToken]);
 
   const send = useCallback((data: unknown) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {

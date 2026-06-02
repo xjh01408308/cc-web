@@ -20,6 +20,11 @@ const authenticatedBrowsers = new Map<WebSocket, Set<string>>();  // browser ws 
 const browserSessions = new Map<string, Set<WebSocket>>();
 const allBrowsers = new Set<WebSocket>();
 
+// 认证速率限制
+const authAttempts = new Map<WebSocket, { failures: number; lastAttempt: number }>();
+const MAX_AUTH_FAILURES = 5;
+const AUTH_COOLDOWN_MS = 60000;
+
 // HTTP API 请求-响应匹配
 const pendingRequests = new Map<string, (data: unknown) => void>();
 
@@ -280,6 +285,18 @@ function handleBrowserMessage(ws: WebSocket, msg: BrowserMessage): void {
     case 'auth_node': {
       const authNodeId = msg.nodeId as string;
       const password = msg.password as string;
+
+      // 速率限制检查
+      const attempts = authAttempts.get(ws);
+      if (attempts && attempts.failures >= MAX_AUTH_FAILURES) {
+        const elapsed = Date.now() - attempts.lastAttempt;
+        if (elapsed < AUTH_COOLDOWN_MS) {
+          send(ws, { type: 'auth_result', nodeId: authNodeId, success: false, error: `认证失败过多，${Math.ceil((AUTH_COOLDOWN_MS - elapsed) / 1000)}秒后重试` });
+          return;
+        }
+        attempts.failures = 0;
+      }
+
       if (!authNodeId || !localNodes.has(authNodeId)) {
         send(ws, { type: 'error', error: `节点 ${authNodeId} 不在线` });
         return;
@@ -290,10 +307,16 @@ function handleBrowserMessage(ws: WebSocket, msg: BrowserMessage): void {
         clearTimeout(timeout);
         const result = resultMsg as LocalMessage;
         if (result.success) {
+          authAttempts.delete(ws);
           if (!authenticatedBrowsers.has(ws)) {
             authenticatedBrowsers.set(ws, new Set());
           }
           authenticatedBrowsers.get(ws)!.add(authNodeId);
+        } else {
+          if (!authAttempts.has(ws)) authAttempts.set(ws, { failures: 0, lastAttempt: 0 });
+          const att = authAttempts.get(ws)!;
+          att.failures++;
+          att.lastAttempt = Date.now();
         }
         send(ws, { type: 'auth_result', nodeId: authNodeId, success: result.success, error: result.error });
       });
@@ -600,6 +623,7 @@ export function handleBrowserConnection(ws: WebSocket, ip: string): void {
     allBrowsers.delete(ws);
     browserNodeMap.delete(ws);
     authenticatedBrowsers.delete(ws);
+    authAttempts.delete(ws);
     for (const [, clients] of browserSessions) {
       clients.delete(ws);
     }

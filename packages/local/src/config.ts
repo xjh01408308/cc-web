@@ -10,6 +10,8 @@ export const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT || '';
 export const FORCE_PERMISSION_MODE = process.env.CLAUDE_FORCE_PERMISSION_MODE || '';
 export const RECONNECT_DELAY = Number(process.env.RECONNECT_DELAY) || 2000;
 export const MAX_RECONNECT_DELAY = Number(process.env.MAX_RECONNECT_DELAY) || 30000;
+// 中继服务 TLS CA 证书路径（wss 连接自签名证书时使用，留空则使用系统 CA）
+export const RELAY_CA_CERT = process.env.RELAY_CA_CERT || '';
 
 export function isDevMode(): boolean {
   return NODE_ENV !== 'production';

@@ -2,7 +2,7 @@
 const host = window.location.hostname;
 const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
 const baseUrl = import.meta.env.VITE_WS_URL || `${protocol}://${host}/ws/browser`;
-const browserToken = import.meta.env.VITE_BROWSER_TOKEN || '';
-export const WS_BROWSER_URL = browserToken
-  ? `${baseUrl}?token=${encodeURIComponent(browserToken)}`
-  : baseUrl;
+
+export function getWsUrl(sessionToken: string | null): string {
+  return sessionToken ? `${baseUrl}?token=${encodeURIComponent(sessionToken)}` : baseUrl;
+}

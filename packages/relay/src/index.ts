@@ -14,19 +14,35 @@ console.warn = (...args: unknown[]) => _warn(`[${ts()}]`, ...args);
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { randomBytes } from 'node:crypto';
 import { WebSocketServer } from 'ws';
-import { RELAY_PORT, RELAY_BROWSER_TOKEN, STATIC_DIR, isDevMode, isUsingDefaultRelayToken } from './config.js';
+import { RELAY_PORT, RELAY_BROWSER_TOKEN, RELAY_PASSWORD, STATIC_DIR, isDevMode, isUsingDefaultRelayToken } from './config.js';
 import { serveStatic } from './static.js';
 import { handleBrowserConnection, handleLocalConnection, requestLocal, getOnlineNodes, isNodePasswordRequired } from './ws-relay.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const staticDir = path.resolve(__dirname, STATIC_DIR);
 
+// ---- Session Token 管理 ----
+const sessionTokens = new Map<string, number>(); // token → createdAt
+const SESSION_TTL = 24 * 60 * 60 * 1000; // 24 小时
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [token, created] of sessionTokens) {
+    if (now - created > SESSION_TTL) sessionTokens.delete(token);
+  }
+}, 5 * 60 * 1000);
+
 function jsonResponse(res: http.ServerResponse, data: unknown, status = 200): void {
   if (status >= 400) {
     console.warn(`HTTP ${status}: ${(data as { error?: string })?.error || 'unknown'}`);
   }
-  res.writeHead(status, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (isDevMode()) {
+    headers['Access-Control-Allow-Origin'] = '*';
+  }
+  res.writeHead(status, headers);
   res.end(JSON.stringify(data));
 }
 
@@ -38,7 +54,47 @@ function getQueryParam(req: http.IncomingMessage, name: string): string | undefi
   return params.get(name) || undefined;
 }
 
-const server = http.createServer((req, res) => {
+function readBody(req: http.IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (chunk: Buffer) => chunks.push(chunk));
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
+    req.on('error', reject);
+  });
+}
+
+const server = http.createServer(async (req, res) => {
+  // OPTIONS 预检
+  if (req.method === 'OPTIONS') {
+    const headers: Record<string, string> = { 'Access-Control-Max-Age': '86400' };
+    if (isDevMode()) {
+      headers['Access-Control-Allow-Origin'] = '*';
+      headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS';
+      headers['Access-Control-Allow-Headers'] = 'Content-Type';
+    }
+    res.writeHead(204, headers);
+    res.end();
+    return;
+  }
+
+  // 登录端点
+  if (req.url?.startsWith('/api/login') && req.method === 'POST') {
+    try {
+      const body = await readBody(req);
+      const { password } = JSON.parse(body || '{}');
+      if (!RELAY_PASSWORD || password === RELAY_PASSWORD) {
+        const token = randomBytes(32).toString('hex');
+        sessionTokens.set(token, Date.now());
+        jsonResponse(res, { token });
+      } else {
+        jsonResponse(res, { error: '密码错误' }, 401);
+      }
+    } catch {
+      jsonResponse(res, { error: '请求格式错误' }, 400);
+    }
+    return;
+  }
+
   // 节点列表 API
   if (req.url?.startsWith('/api/nodes') && req.method === 'GET') {
     jsonResponse(res, getOnlineNodes());
@@ -101,25 +157,33 @@ function getClientIp(req: http.IncomingMessage): string {
 server.on('upgrade', (req, socket, head) => {
   const ip = getClientIp(req);
   if (req.url?.startsWith('/ws/browser')) {
-    if (!isDevMode() && !RELAY_BROWSER_TOKEN) {
-      console.error(`[relay] 生产模式下 RELAY_BROWSER_TOKEN 未设置，拒绝浏览器连接 | IP: ${ip}`);
-      socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n');
-      socket.destroy();
+    const url = new URL(req.url, 'http://localhost');
+    const token = url.searchParams.get('token');
+
+    // session token 优先验证
+    if (token && sessionTokens.has(token)) {
+      browserWss.handleUpgrade(req, socket, head, (ws) => {
+        handleBrowserConnection(ws, ip);
+      });
       return;
     }
-    if (RELAY_BROWSER_TOKEN) {
-      const url = new URL(req.url, 'http://localhost');
-      const token = url.searchParams.get('token');
-      if (token !== RELAY_BROWSER_TOKEN) {
-        console.warn(`[relay] 浏览器 WebSocket 认证失败: token 不匹配 | IP: ${ip}`);
-        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-        socket.destroy();
-        return;
-      }
+    // 回退到旧式 RELAY_BROWSER_TOKEN（向后兼容）
+    if (RELAY_BROWSER_TOKEN && token === RELAY_BROWSER_TOKEN) {
+      browserWss.handleUpgrade(req, socket, head, (ws) => {
+        handleBrowserConnection(ws, ip);
+      });
+      return;
     }
-    browserWss.handleUpgrade(req, socket, head, (ws) => {
-      handleBrowserConnection(ws, ip);
-    });
+    // 开发模式且无 RELAY_PASSWORD → 放行
+    if (isDevMode() && !RELAY_PASSWORD) {
+      browserWss.handleUpgrade(req, socket, head, (ws) => {
+        handleBrowserConnection(ws, ip);
+      });
+      return;
+    }
+    console.warn(`[relay] 浏览器 WebSocket 认证失败: 无有效 token | IP: ${ip}`);
+    socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+    socket.destroy();
   } else if (req.url === '/ws/local') {
     localWss.handleUpgrade(req, socket, head, (ws) => {
       handleLocalConnection(ws, ip);
@@ -151,8 +215,8 @@ server.listen(RELAY_PORT, '127.0.0.1', () => {
   if (isDevMode()) {
     console.warn('════════════════════════════════════════════════════════');
     console.warn('  [DEV MODE] 开发模式 (NODE_ENV != "production")');
-    if (!RELAY_BROWSER_TOKEN) {
-      console.warn('  [INSECURE] RELAY_BROWSER_TOKEN 为空 — 浏览器 WebSocket 无需认证');
+    if (!RELAY_PASSWORD) {
+      console.warn('  [INSECURE] RELAY_PASSWORD 为空 — 浏览器登录无需密码');
     }
     if (isUsingDefaultRelayToken()) {
       console.warn('  [INSECURE] RELAY_TOKEN 使用默认值 "dev-token" — 节点注册不安全');

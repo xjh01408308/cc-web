@@ -112,6 +112,8 @@ export function deleteProject(projectId: string): boolean {
 // ─── Session API ──────────────────────────────────────────
 
 export function createSession(projectId: string, projectPath: string, model?: string, permissionMode?: string): SessionInfo {
+  const pathError = validateProjectPath(projectPath, WORKSPACE_ROOT);
+  if (pathError) throw new Error(pathError);
   const sessionId = randomUUID();
   const row = db.createSession(sessionId, projectId);
   const session: Session = {
