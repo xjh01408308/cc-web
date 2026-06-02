@@ -63,6 +63,12 @@ function readBody(req: http.IncomingMessage): Promise<string> {
   });
 }
 
+function validateSessionToken(req: http.IncomingMessage): boolean {
+  if (isDevMode() && !RELAY_PASSWORD) return true;
+  const token = getQueryParam(req, 'token');
+  return !!token && sessionTokens.has(token);
+}
+
 const server = http.createServer(async (req, res) => {
   // OPTIONS 预检
   if (req.method === 'OPTIONS') {
@@ -82,12 +88,16 @@ const server = http.createServer(async (req, res) => {
     try {
       const body = await readBody(req);
       const { password } = JSON.parse(body || '{}');
-      if (!RELAY_PASSWORD || password === RELAY_PASSWORD) {
+      if (password === RELAY_PASSWORD) {
+        const token = randomBytes(32).toString('hex');
+        sessionTokens.set(token, Date.now());
+        jsonResponse(res, { token });
+      } else if (!RELAY_PASSWORD && isDevMode()) {
         const token = randomBytes(32).toString('hex');
         sessionTokens.set(token, Date.now());
         jsonResponse(res, { token });
       } else {
-        jsonResponse(res, { error: '密码错误' }, 401);
+        jsonResponse(res, { error: RELAY_PASSWORD ? '密码错误' : '未配置访问密码' }, 401);
       }
     } catch {
       jsonResponse(res, { error: '请求格式错误' }, 400);
@@ -97,12 +107,20 @@ const server = http.createServer(async (req, res) => {
 
   // 节点列表 API
   if (req.url?.startsWith('/api/nodes') && req.method === 'GET') {
+    if (!validateSessionToken(req)) {
+      jsonResponse(res, { error: '未认证' }, 401);
+      return;
+    }
     jsonResponse(res, getOnlineNodes());
     return;
   }
 
   // 项目列表 API
   if (req.url?.startsWith('/api/projects') && req.method === 'GET') {
+    if (!validateSessionToken(req)) {
+      jsonResponse(res, { error: '未认证' }, 401);
+      return;
+    }
     const nodeId = getQueryParam(req, 'nodeId');
     // 指定节点需密码 → 拦截；未指定节点但首个在线节点需密码 → 也拦截
     const targetNodeId = nodeId || getOnlineNodes()[0]?.nodeId;
@@ -121,6 +139,10 @@ const server = http.createServer(async (req, res) => {
 
   // 会话列表 API
   if (req.url?.startsWith('/api/sessions') && req.method === 'GET') {
+    if (!validateSessionToken(req)) {
+      jsonResponse(res, { error: '未认证' }, 401);
+      return;
+    }
     const url = new URL(req.url, 'http://localhost');
     const projectId = url.searchParams.get('projectId') || undefined;
     const nodeId = url.searchParams.get('nodeId') || undefined;

@@ -61,6 +61,11 @@ export function ChatView() {
   const { connected, send, onRawMessage } = useWebSocket(sessionToken);
   const { processStreamLine } = useClaudeStreaming();
 
+  const authFetch = useCallback((url: string) => {
+    const sep = url.includes('?') ? '&' : '?';
+    return fetch(`${url}${sep}token=${encodeURIComponent(sessionToken!)}`);
+  }, [sessionToken]);
+
   // 自动登录（开发模式下 relay 无密码时）
   useEffect(() => {
     (async () => {
@@ -211,12 +216,12 @@ export function ChatView() {
 
   // 初始加载节点列表和项目列表（通过 HTTP，可靠）
   useEffect(() => {
-    if (initialLoadDone.current) return;
+    if (!sessionToken || initialLoadDone.current) return;
     initialLoadDone.current = true;
 
     const saved = loadLastView();
 
-    fetch("/api/nodes")
+    authFetch("/api/nodes")
       .then((r) => r.json())
       .then((data: NodeInfo[]) => {
         setNodes(data);
@@ -234,7 +239,7 @@ export function ChatView() {
           pendingSessionRef.current = saved?.sessionId || null;
 
           // 加载该节点的项目和会话
-          fetch(`/api/projects?nodeId=${encodeURIComponent(restoreNodeId)}`)
+          authFetch(`/api/projects?nodeId=${encodeURIComponent(restoreNodeId)}`)
             .then((r) => r.json())
             .then((projData) => {
               if ((projData as { error?: string }).error === 'auth_required') {
@@ -244,7 +249,7 @@ export function ChatView() {
               setProjects(projData as ProjectInfo[]);
             })
             .catch(() => {});
-          fetch(`/api/sessions?nodeId=${encodeURIComponent(restoreNodeId)}`)
+          authFetch(`/api/sessions?nodeId=${encodeURIComponent(restoreNodeId)}`)
             .then((r) => r.json())
             .then((sessData: SessionInfo[] | { error?: string }) => {
               if ('error' in sessData && sessData.error === 'auth_required') {
@@ -291,20 +296,20 @@ export function ChatView() {
 
     // 没有恢复节点时才用默认请求（无 nodeId = 取第一个在线节点）
     if (!saved?.nodeId) {
-      fetch("/api/projects")
+      authFetch("/api/projects")
         .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
         .then((data: ProjectInfo[]) => {
           if (!restoredRef.current) setProjects(data);
         })
         .catch(() => {});
-      fetch("/api/sessions")
+      authFetch("/api/sessions")
         .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
         .then((data: SessionInfo[]) => {
           if (!restoredRef.current) setSessions(data);
         })
         .catch(() => {});
     }
-  }, []);
+  }, [sessionToken, authFetch]);
 
   // 持久化当前浏览状态
   useEffect(() => {
@@ -764,7 +769,7 @@ export function ChatView() {
       setPendingAuthNodeId(null);
 
       // 加载该节点的项目和会话
-      fetch(`/api/projects?nodeId=${encodeURIComponent(nodeId)}`)
+      authFetch(`/api/projects?nodeId=${encodeURIComponent(nodeId)}`)
         .then((r) => r.json())
         .then((data) => {
           if ((data as { error?: string }).error === 'auth_required') {
@@ -775,7 +780,7 @@ export function ChatView() {
         })
         .catch(() => {});
 
-      fetch(`/api/sessions?nodeId=${encodeURIComponent(nodeId)}`)
+      authFetch(`/api/sessions?nodeId=${encodeURIComponent(nodeId)}`)
         .then((r) => r.json())
         .then((data) => {
           if ((data as { error?: string }).error === 'auth_required') {
