@@ -65,8 +65,9 @@ function readBody(req: http.IncomingMessage): Promise<string> {
 
 function validateSessionToken(req: http.IncomingMessage): boolean {
   if (isDevMode() && !RELAY_PASSWORD) return true;
-  const token = getQueryParam(req, 'token');
-  return !!token && sessionTokens.has(token);
+  const auth = req.headers['authorization'];
+  if (!auth?.startsWith('Bearer ')) return false;
+  return sessionTokens.has(auth.slice(7));
 }
 
 const server = http.createServer(async (req, res) => {

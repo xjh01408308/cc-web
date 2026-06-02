@@ -62,8 +62,7 @@ export function ChatView() {
   const { processStreamLine } = useClaudeStreaming();
 
   const authFetch = useCallback((url: string) => {
-    const sep = url.includes('?') ? '&' : '?';
-    return fetch(`${url}${sep}token=${encodeURIComponent(sessionToken!)}`);
+    return fetch(url, { headers: { 'Authorization': `Bearer ${sessionToken!}` } });
   }, [sessionToken]);
 
   // 自动登录（开发模式下 relay 无密码时）
