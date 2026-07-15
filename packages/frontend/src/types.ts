@@ -245,6 +245,7 @@ export interface NodeInfo {
   nodeId: string;
   sessionCount: number;
   passwordRequired?: boolean;
+  workspaceRoot?: string;
 }
 
 export interface WSAuthNodeMessage {

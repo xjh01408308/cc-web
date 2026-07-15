@@ -1,6 +1,6 @@
 import { WebSocket } from 'ws';
 import { readFileSync } from 'node:fs';
-import { RELAY_URL, RELAY_TOKEN, NODE_ID, NODE_PASSWORD, RECONNECT_DELAY, MAX_RECONNECT_DELAY, RELAY_CA_CERT } from './config.js';
+import { RELAY_URL, RELAY_TOKEN, NODE_ID, NODE_PASSWORD, WORKSPACE_ROOT, RECONNECT_DELAY, MAX_RECONNECT_DELAY, RELAY_CA_CERT } from './config.js';
 
 type MessageHandler = (msg: { type: string; [key: string]: unknown }) => void;
 
@@ -57,7 +57,7 @@ function connect(): void {
     reconnectAttempt = 0;  // 连接成功后重置重连计数
 
     // 注册
-    send({ type: 'register', nodeId: NODE_ID, token: RELAY_TOKEN, passwordRequired: !!NODE_PASSWORD });
+    send({ type: 'register', nodeId: NODE_ID, token: RELAY_TOKEN, passwordRequired: !!NODE_PASSWORD, workspaceRoot: WORKSPACE_ROOT });
   });
 
   ws.on('message', (raw) => {

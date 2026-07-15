@@ -26,6 +26,7 @@ interface ProjectSidebarProps {
   fileTreeLoading: Set<string>;
   onRequestFileTree: (projectPath: string, projectId: string) => void;
   onFileTreeNodeClick: (filePath: string, projectPath: string) => void;
+  defaultProjectPath: string;
 }
 
 function statusColor(status: string) {
@@ -62,6 +63,7 @@ export function ProjectSidebar({
   fileTreeLoading,
   onRequestFileTree,
   onFileTreeNodeClick,
+  defaultProjectPath,
 }: ProjectSidebarProps) {
   const [activeTab, setActiveTab] = useState<Map<string, 'sessions' | 'git' | 'files'>>(new Map());
 
@@ -80,7 +82,7 @@ export function ProjectSidebar({
   const handleCreateProject = () => {
     const name = prompt("请输入项目名称:", "");
     if (!name) return;
-    const projectPath = prompt("请输入项目路径:", "D:\\codes\\");
+    const projectPath = prompt("请输入项目路径:", defaultProjectPath);
     if (!projectPath) return;
     onCreateProject(name, projectPath);
   };

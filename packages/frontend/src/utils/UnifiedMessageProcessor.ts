@@ -258,6 +258,13 @@ export class UnifiedMessageProcessor {
       );
     }
 
+    // tool_use 标志着当前 assistant 文本回合结束：重置 currentAssistantMessage，
+    // 使下一轮 SDK assistant 消息里的 text 走"新建 chat"分支（handleAssistantText）。
+    // 否则 currentAssistantMessage 会跨轮次保留上一轮的 chat，handleAssistantText
+    // 误走"追加"分支调用 updateLastMessage，而此时数组最后一条已被 tool / tool_result
+    // 占据，updateLastMessage 不命中导致 text 丢失。
+    context.setCurrentAssistantMessage?.(null);
+
     // Special handling for ExitPlanMode - create plan message instead of tool message
     if (contentItem.name === "ExitPlanMode") {
       const planContent = (contentItem.input?.plan as string) || "";
@@ -308,6 +315,11 @@ export class UnifiedMessageProcessor {
         context.addMessage(systemMessage);
         context.onInitMessageShown?.();
       }
+    } else if ((message.subtype as string) === "thinking_tokens") {
+      // thinking_tokens 是高频增量 system 消息（每 token 增量一条），仅含 estimated_tokens
+      // 计数，不含可读思考文本；真正的思考内容由 assistant 的 thinking content item 渲染。
+      // 跳过以避免每条 delta 都新增一个信息框刷屏。（SDK 类型未声明该 subtype，故 as string）
+      return;
     } else {
       // Always show non-init system messages
       const systemMessage = convertSystemMessage(message, timestamp);

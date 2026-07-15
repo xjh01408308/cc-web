@@ -39,6 +39,7 @@ export interface LocalMessage {
   password?: string;
   success?: boolean;
   passwordRequired?: boolean;
+  workspaceRoot?: string;
   filePath?: string;
   staged?: boolean;
   gitStatus?: GitStatusResult;
@@ -48,15 +49,16 @@ export interface LocalMessage {
 }
 
 export interface RelayMessage {
-  type: 'claude_json' | 'done' | 'error' | 'aborted' | 'session_info' | 'session_end' | 'sessions_list' | 'projects_list' | 'project_info' | 'nodes_list' | 'node_selected' | 'auth_result' | 'git_status' | 'git_diff' | 'file_tree' | 'file_content';
+  type: 'claude_json' | 'done' | 'error' | 'aborted' | 'session_info' | 'session_end' | 'sessions_list' | 'projects_list' | 'project_info' | 'nodes_list' | 'node_selected' | 'auth_result' | 'auth_required' | 'git_status' | 'git_diff' | 'file_tree' | 'file_content';
   sessionId?: string;
   nodeId?: string;
   data?: unknown;
   error?: string;
+  message?: string;
   sessions?: SessionInfo[];
   projects?: ProjectInfo[];
   project?: ProjectInfo;
-  nodes?: Array<{ nodeId: string; sessionCount: number; passwordRequired: boolean }>;
+  nodes?: Array<{ nodeId: string; sessionCount: number; passwordRequired: boolean; workspaceRoot?: string }>;
   success?: boolean;
   gitStatus?: GitStatusResult;
   diffResult?: GitDiffResult;

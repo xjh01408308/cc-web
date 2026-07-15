@@ -53,6 +53,7 @@ function useIsMobile() {
 
 export function ChatView() {
   // ---- 登录状态 ----
+  const SESSION_TOKEN_KEY = "cc-web-session-token";
   const [sessionToken, setSessionToken] = useState<string | null>(null);
   const [loginPassword, setLoginPassword] = useState("");
   const [loginError, setLoginError] = useState<string | null>(null);
@@ -61,12 +62,34 @@ export function ChatView() {
   const { connected, send, onRawMessage } = useWebSocket(sessionToken);
   const { processStreamLine } = useClaudeStreaming();
 
-  const authFetch = useCallback((url: string) => {
-    return fetch(url, { headers: { 'Authorization': `Bearer ${sessionToken!}` } });
-  }, [sessionToken]);
+  // 清除登录态：token 过期或主动登出时调用，重置加载守卫以便重新登录后能正常加载数据
+  const clearSession = useCallback(() => {
+    try { localStorage.removeItem(SESSION_TOKEN_KEY); } catch { /* localStorage 不可用 */ }
+    initialLoadDone.current = false;
+    setSessionToken(null);
+  }, []);
 
-  // 自动登录（开发模式下 relay 无密码时）
+  const authFetch = useCallback((url: string) => {
+    return fetch(url, { headers: { 'Authorization': `Bearer ${sessionToken!}` } }).then((resp) => {
+      // session token 过期或无效 → 清除并回到登录页
+      if (resp.status === 401) {
+        clearSession();
+        throw new Error('SESSION_EXPIRED');
+      }
+      return resp;
+    });
+  }, [sessionToken, clearSession]);
+
+  // 初始化：优先恢复已有 session，否则尝试无密码自动登录（dev 模式 relay 无密码时）
   useEffect(() => {
+    try {
+      const saved = localStorage.getItem(SESSION_TOKEN_KEY);
+      if (saved) {
+        setSessionToken(saved);
+        return;
+      }
+    } catch { /* localStorage 不可用，走自动登录 */ }
+
     (async () => {
       try {
         const resp = await fetch("/api/login", {
@@ -76,7 +99,10 @@ export function ChatView() {
         });
         if (resp.ok) {
           const data = await resp.json();
-          if (data.token) setSessionToken(data.token);
+          if (data.token) {
+            try { localStorage.setItem(SESSION_TOKEN_KEY, data.token); } catch {}
+            setSessionToken(data.token);
+          }
         }
       } catch { /* 登录失败不处理，用户手动登录 */ }
     })();
@@ -93,6 +119,7 @@ export function ChatView() {
       });
       if (resp.ok) {
         const data = await resp.json();
+        try { localStorage.setItem(SESSION_TOKEN_KEY, data.token); } catch {}
         setSessionToken(data.token);
       } else {
         const data = await resp.json();
@@ -106,8 +133,8 @@ export function ChatView() {
   }, [loginPassword]);
 
   const handleLogout = useCallback(() => {
-    setSessionToken(null);
-  }, []);
+    clearSession();
+  }, [clearSession]);
 
   const isMobile = useIsMobile();
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -162,6 +189,7 @@ export function ChatView() {
   const currentAssistantMessageRef = useRef<ChatMessage | null>(null);
   const initialLoadDone = useRef(false);
   const pendingSessionRef = useRef<string | null>(null);
+  const creatingNewSessionRef = useRef(false);
   const handleRawMessageRef = useRef<((raw: string) => void) | null>(null);
   const restoredRef = useRef(false);
   const autoAuthTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -451,6 +479,14 @@ export function ChatView() {
             continue;
           }
 
+          // 节点密码认证拦截（WS 路径）：触发自动认证或弹出密码框
+          if (data.type === "auth_required" && data.nodeId) {
+            setPendingAuthNodeId(data.nodeId as string);
+            setIsLoading(false);
+            setTaskProgress(null);
+            continue;
+          }
+
           // 按 nodeId 过滤：消息附带 nodeId 且与当前选中节点不匹配时跳过
           if (data.nodeId && activeNodeId && data.nodeId !== activeNodeId) {
             continue;
@@ -495,7 +531,19 @@ export function ChatView() {
               }
               return [...prev, info];
             });
-            if (!activeSessionId && !pendingSessionRef.current) {
+            if (creatingNewSessionRef.current) {
+              // 新建会话成功，默认选中该会话
+              creatingNewSessionRef.current = false;
+              setActiveSessionId(info.sessionId);
+              setActiveProjectId(info.projectId);
+              pendingSessionRef.current = info.sessionId;
+              setMessages([]);
+              setHasReceivedInit(false);
+              setTokenUsage(null);
+              setModel("");
+              setPermissionDenials(null);
+              setTaskProgress(null);
+            } else if (!activeSessionId && !pendingSessionRef.current) {
               setActiveSessionId(info.sessionId);
               setActiveProjectId(info.projectId);
               pendingSessionRef.current = info.sessionId;
@@ -793,6 +841,17 @@ export function ChatView() {
     [nodes, authenticatedNodes, tryAutoAuth],
   );
 
+  // 自动选中节点（单节点场景）后，若该节点需要密码且未认证，触发认证流程
+  useEffect(() => {
+    if (!activeNodeId || !connected || autoAuthInProgress || pendingAuthNodeId) return;
+    const node = nodes.find((n) => n.nodeId === activeNodeId);
+    if (node?.passwordRequired && !authenticatedNodes.has(activeNodeId)) {
+      if (!tryAutoAuth(activeNodeId)) {
+        setPendingAuthNodeId(activeNodeId);
+      }
+    }
+  }, [activeNodeId, nodes, connected, authenticatedNodes, autoAuthInProgress, pendingAuthNodeId, tryAutoAuth]);
+
   const handleAuthNode = useCallback(
     (nodeId: string, password: string) => {
       setAuthError(null);
@@ -830,6 +889,7 @@ export function ChatView() {
 
   const handleCreateSession = useCallback(
     (projectId: string, projectPath: string) => {
+      creatingNewSessionRef.current = true;
       // acceptEdits: 自动批准文件读写，Bash 等操作仍需确认
       send({ type: "create_session", projectId, projectPath, permissionMode: "acceptEdits", nodeId: activeNodeId || undefined });
     },
@@ -1145,6 +1205,7 @@ export function ChatView() {
         fileTreeLoading={fileTreeLoading}
         onRequestFileTree={handleRequestFileTree}
         onFileTreeNodeClick={handleFileTreeNodeClick}
+        defaultProjectPath={nodes.find((n) => n.nodeId === activeNodeId)?.workspaceRoot || ""}
       />
       <div className="flex-1 flex flex-col min-w-0">
         {/* Toggle button bar */}

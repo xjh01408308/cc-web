@@ -23,6 +23,7 @@ export function useWebSocket(sessionToken: string | null): UseWebSocketReturn {
 
   const connect = useCallback(() => {
     if (!mounted.current) return;
+    if (!sessionToken) return; // 未登录时不连接，避免生产模式无 token 被拒后无限重连
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
     const url = getWsUrl(sessionToken);

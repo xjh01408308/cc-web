@@ -9,6 +9,7 @@ interface NodeInfo {
   ws: WebSocket;
   nodeId: string;
   passwordRequired: boolean;
+  workspaceRoot?: string;
 }
 
 const localNodes = new Map<string, NodeInfo>();       // nodeId → NodeInfo
@@ -42,6 +43,11 @@ function send(ws: WebSocket, data: unknown): void {
   if (ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(data));
   }
+}
+
+// 节点需要密码认证：发送结构化信号，前端据此弹密码框（区别于流式 error）
+function sendAuthRequired(ws: WebSocket, nodeId: string): void {
+  send(ws, { type: 'auth_required', nodeId, message: `节点 ${nodeId} 需要密码认证` });
 }
 
 function broadcastToSession(sessionId: string, data: unknown): void {
@@ -80,13 +86,13 @@ function registerBrowserRequest(ws: WebSocket, msgType: string): string {
 }
 
 function broadcastNodesList(): void {
-  const nodes: Array<{ nodeId: string; sessionCount: number; passwordRequired: boolean }> = [];
+  const nodes: Array<{ nodeId: string; sessionCount: number; passwordRequired: boolean; workspaceRoot?: string }> = [];
   for (const [nodeId, info] of localNodes) {
     let count = 0;
     for (const [, nid] of sessionNodeMap) {
       if (nid === nodeId) count++;
     }
-    nodes.push({ nodeId, sessionCount: count, passwordRequired: info.passwordRequired });
+    nodes.push({ nodeId, sessionCount: count, passwordRequired: info.passwordRequired, workspaceRoot: info.workspaceRoot });
   }
   broadcastToAllBrowsers({ type: 'nodes_list', nodes });
 }
@@ -125,13 +131,13 @@ function handleBrowserMessage(ws: WebSocket, msg: BrowserMessage): void {
     }
 
     case 'list_nodes': {
-      const nodes: Array<{ nodeId: string; sessionCount: number; passwordRequired: boolean }> = [];
+      const nodes: Array<{ nodeId: string; sessionCount: number; passwordRequired: boolean; workspaceRoot?: string }> = [];
       for (const [nid, info] of localNodes) {
         let count = 0;
         for (const [, nid2] of sessionNodeMap) {
           if (nid2 === nid) count++;
         }
-        nodes.push({ nodeId: nid, sessionCount: count, passwordRequired: info.passwordRequired });
+        nodes.push({ nodeId: nid, sessionCount: count, passwordRequired: info.passwordRequired, workspaceRoot: info.workspaceRoot });
       }
       send(ws, { type: 'nodes_list', nodes });
       return;
@@ -149,7 +155,7 @@ function handleBrowserMessage(ws: WebSocket, msg: BrowserMessage): void {
         return;
       }
       if (!isAuthenticated(ws, targetNode)) {
-        send(ws, { type: 'error', error: `节点 ${targetNode} 需要密码认证` });
+        sendAuthRequired(ws, targetNode);
         return;
       }
       // 订阅该会话
@@ -176,7 +182,7 @@ function handleBrowserMessage(ws: WebSocket, msg: BrowserMessage): void {
         return;
       }
       if (!isAuthenticated(ws, targetNode)) {
-        send(ws, { type: 'error', error: `节点 ${targetNode} 需要密码认证` });
+        sendAuthRequired(ws, targetNode);
         return;
       }
       send(node.ws, { type: 'create_session', projectPath: msg.projectPath, projectId: msg.projectId, model: msg.model, permissionMode: msg.permissionMode });
@@ -190,7 +196,7 @@ function handleBrowserMessage(ws: WebSocket, msg: BrowserMessage): void {
         const node = localNodes.get(targetNode);
         if (node) {
           if (!isAuthenticated(ws, targetNode)) {
-            send(ws, { type: 'error', error: `节点 ${targetNode} 需要密码认证` });
+            sendAuthRequired(ws, targetNode);
             return;
           }
           send(node.ws, { type: 'stop_session', sessionId: msg.sessionId });
@@ -206,7 +212,7 @@ function handleBrowserMessage(ws: WebSocket, msg: BrowserMessage): void {
         const node = localNodes.get(targetNode);
         if (node) {
           if (!isAuthenticated(ws, targetNode)) {
-            send(ws, { type: 'error', error: `节点 ${targetNode} 需要密码认证` });
+            sendAuthRequired(ws, targetNode);
             return;
           }
           send(node.ws, { type: 'delete_session', sessionId: msg.sessionId });
@@ -224,7 +230,7 @@ function handleBrowserMessage(ws: WebSocket, msg: BrowserMessage): void {
       const node = localNodes.get(targetNode);
       if (!node) return;
       if (!isAuthenticated(ws, targetNode)) {
-        send(ws, { type: 'error', error: `节点 ${targetNode} 需要密码认证` });
+        sendAuthRequired(ws, targetNode);
         return;
       }
       const reqId = registerBrowserRequest(ws, 'list_sessions');
@@ -241,7 +247,7 @@ function handleBrowserMessage(ws: WebSocket, msg: BrowserMessage): void {
       const node = localNodes.get(targetNode);
       if (!node) return;
       if (!isAuthenticated(ws, targetNode)) {
-        send(ws, { type: 'error', error: `节点 ${targetNode} 需要密码认证` });
+        sendAuthRequired(ws, targetNode);
         return;
       }
       const reqId = registerBrowserRequest(ws, 'create_project');
@@ -258,7 +264,7 @@ function handleBrowserMessage(ws: WebSocket, msg: BrowserMessage): void {
       const node = localNodes.get(targetNode);
       if (!node) return;
       if (!isAuthenticated(ws, targetNode)) {
-        send(ws, { type: 'error', error: `节点 ${targetNode} 需要密码认证` });
+        sendAuthRequired(ws, targetNode);
         return;
       }
       send(node.ws, { type: 'delete_project', projectId: msg.projectId });
@@ -274,7 +280,7 @@ function handleBrowserMessage(ws: WebSocket, msg: BrowserMessage): void {
       const node = localNodes.get(targetNode);
       if (!node) return;
       if (!isAuthenticated(ws, targetNode)) {
-        send(ws, { type: 'error', error: `节点 ${targetNode} 需要密码认证` });
+        sendAuthRequired(ws, targetNode);
         return;
       }
       const reqId = registerBrowserRequest(ws, 'list_projects');
@@ -337,7 +343,7 @@ function handleBrowserMessage(ws: WebSocket, msg: BrowserMessage): void {
         const node = localNodes.get(targetNode);
         if (node) {
           if (!isAuthenticated(ws, targetNode)) {
-            send(ws, { type: 'error', error: `节点 ${targetNode} 需要密码认证` });
+            sendAuthRequired(ws, targetNode);
             return;
           }
           send(node.ws, { type: 'change_permission_mode', sessionId: msg.sessionId, permissionMode: msg.permissionMode });
@@ -353,7 +359,7 @@ function handleBrowserMessage(ws: WebSocket, msg: BrowserMessage): void {
         const node = localNodes.get(targetNode);
         if (node) {
           if (!isAuthenticated(ws, targetNode)) {
-            send(ws, { type: 'error', error: `节点 ${targetNode} 需要密码认证` });
+            sendAuthRequired(ws, targetNode);
             return;
           }
           send(node.ws, { type: 'retry_with_permission', sessionId: msg.sessionId, permissionMode: msg.permissionMode });
@@ -371,7 +377,7 @@ function handleBrowserMessage(ws: WebSocket, msg: BrowserMessage): void {
       const node = localNodes.get(targetNode);
       if (!node) return;
       if (!isAuthenticated(ws, targetNode)) {
-        send(ws, { type: 'error', error: `节点 ${targetNode} 需要密码认证` });
+        sendAuthRequired(ws, targetNode);
         return;
       }
       const reqId = registerBrowserRequest(ws, 'get_git_status');
@@ -388,7 +394,7 @@ function handleBrowserMessage(ws: WebSocket, msg: BrowserMessage): void {
       const node = localNodes.get(targetNode);
       if (!node) return;
       if (!isAuthenticated(ws, targetNode)) {
-        send(ws, { type: 'error', error: `节点 ${targetNode} 需要密码认证` });
+        sendAuthRequired(ws, targetNode);
         return;
       }
       const reqId = registerBrowserRequest(ws, 'get_git_diff');
@@ -405,7 +411,7 @@ function handleBrowserMessage(ws: WebSocket, msg: BrowserMessage): void {
       const node = localNodes.get(targetNode);
       if (!node) return;
       if (!isAuthenticated(ws, targetNode)) {
-        send(ws, { type: 'error', error: `节点 ${targetNode} 需要密码认证` });
+        sendAuthRequired(ws, targetNode);
         return;
       }
       const reqId = registerBrowserRequest(ws, 'get_file_tree');
@@ -422,7 +428,7 @@ function handleBrowserMessage(ws: WebSocket, msg: BrowserMessage): void {
       const node = localNodes.get(targetNode);
       if (!node) return;
       if (!isAuthenticated(ws, targetNode)) {
-        send(ws, { type: 'error', error: `节点 ${targetNode} 需要密码认证` });
+        sendAuthRequired(ws, targetNode);
         return;
       }
       const reqId = registerBrowserRequest(ws, 'get_file_content');
@@ -462,14 +468,14 @@ export function requestLocal(data: Record<string, unknown>, nodeId?: string): Pr
 }
 
 // 列出所有在线节点（供 HTTP API 使用）
-export function getOnlineNodes(): Array<{ nodeId: string; sessionCount: number; passwordRequired: boolean }> {
-  const nodes: Array<{ nodeId: string; sessionCount: number; passwordRequired: boolean }> = [];
+export function getOnlineNodes(): Array<{ nodeId: string; sessionCount: number; passwordRequired: boolean; workspaceRoot?: string }> {
+  const nodes: Array<{ nodeId: string; sessionCount: number; passwordRequired: boolean; workspaceRoot?: string }> = [];
   for (const [nid, info] of localNodes) {
     let count = 0;
     for (const [, nid2] of sessionNodeMap) {
       if (nid2 === nid) count++;
     }
-    nodes.push({ nodeId: nid, sessionCount: count, passwordRequired: info.passwordRequired });
+    nodes.push({ nodeId: nid, sessionCount: count, passwordRequired: info.passwordRequired, workspaceRoot: info.workspaceRoot });
   }
   return nodes;
 }
@@ -529,7 +535,7 @@ function handleLocalMessage(ws: WebSocket, msg: LocalMessage): void {
         console.log(`[relay] 节点 ${nodeId} 重连，替换旧连接 | IP: ${ip} | 旧连接持续: ${oldDuration}`);
         localNodes.get(nodeId)!.ws.close();
       }
-      localNodes.set(nodeId, { ws, nodeId, passwordRequired: msg.passwordRequired === true });
+      localNodes.set(nodeId, { ws, nodeId, passwordRequired: msg.passwordRequired === true, workspaceRoot: (msg.workspaceRoot as string | undefined) || undefined });
       // 存储 nodeId 到 ws 上供 disconnect 时查找
       (ws as unknown as Record<string, unknown>)._nodeId = nodeId;
       console.log(`[relay] 节点已注册: ${nodeId} | IP: ${ip} | 需密码: ${msg.passwordRequired === true} | 在线节点: ${localNodes.size}`);
