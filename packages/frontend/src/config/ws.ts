@@ -3,6 +3,7 @@ const host = window.location.hostname;
 const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
 const baseUrl = import.meta.env.VITE_WS_URL || `${protocol}://${host}/ws/browser`;
 
-export function getWsUrl(sessionToken: string | null): string {
-  return sessionToken ? `${baseUrl}?token=${encodeURIComponent(sessionToken)}` : baseUrl;
+export function getWsUrl(): string {
+  // 认证走 httpOnly cookie：浏览器在 WS 握手时自动携带同站 cookie，URL 不再附带 token
+  return baseUrl;
 }

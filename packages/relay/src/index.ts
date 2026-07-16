@@ -63,11 +63,50 @@ function readBody(req: http.IncomingMessage): Promise<string> {
   });
 }
 
+const SESSION_COOKIE = 'cc_web_session';
+
+function readSessionCookie(req: http.IncomingMessage): string | undefined {
+  const header = req.headers.cookie;
+  if (!header) return undefined;
+  const match = header.match(new RegExp(`(?:^|;\\s*)${SESSION_COOKIE}=([^;]+)`));
+  if (!match) return undefined;
+  try { return decodeURIComponent(match[1]); } catch { return undefined; }
+}
+
+// 是否经 HTTPS 到达（直接 TLS 或 nginx TLS 终止）——决定 cookie 是否加 Secure
+function isSecureRequest(req: http.IncomingMessage): boolean {
+  if (String(req.headers['x-forwarded-proto'] || '').includes('https')) return true;
+  // req.socket 在 TLS 下实为 TLSSocket，类型层面用 as 断言访问 encrypted
+  return Boolean((req.socket as unknown as { encrypted?: boolean }).encrypted);
+}
+
+function setSessionCookie(res: http.ServerResponse, token: string, req: http.IncomingMessage): void {
+  const parts = [
+    `${SESSION_COOKIE}=${encodeURIComponent(token)}`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Lax',
+    `Max-Age=${Math.floor(SESSION_TTL / 1000)}`,
+  ];
+  if (isSecureRequest(req)) parts.push('Secure');
+  res.setHeader('Set-Cookie', parts.join('; '));
+}
+
+function clearSessionCookie(res: http.ServerResponse, req: http.IncomingMessage): void {
+  const parts = [`${SESSION_COOKIE}=`, 'Path=/', 'HttpOnly', 'SameSite=Lax', 'Max-Age=0'];
+  if (isSecureRequest(req)) parts.push('Secure');
+  res.setHeader('Set-Cookie', parts.join('; '));
+}
+
 function validateSessionToken(req: http.IncomingMessage): boolean {
   if (isDevMode() && !RELAY_PASSWORD) return true;
+  // 优先 httpOnly cookie（浏览器路径，token 不暴露给 JS）
+  const cookieToken = readSessionCookie(req);
+  if (cookieToken && sessionTokens.has(cookieToken)) return true;
+  // 兼容 Authorization Bearer（非浏览器客户端）
   const auth = req.headers['authorization'];
-  if (!auth?.startsWith('Bearer ')) return false;
-  return sessionTokens.has(auth.slice(7));
+  if (auth?.startsWith('Bearer ') && sessionTokens.has(auth.slice(7))) return true;
+  return false;
 }
 
 const server = http.createServer(async (req, res) => {
@@ -84,19 +123,16 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 登录端点
+  // 登录端点：校验通过后下发 httpOnly cookie，token 不再回传给 JS
   if (req.url?.startsWith('/api/login') && req.method === 'POST') {
     try {
       const body = await readBody(req);
       const { password } = JSON.parse(body || '{}');
-      if (password === RELAY_PASSWORD) {
+      if (password === RELAY_PASSWORD || (!RELAY_PASSWORD && isDevMode())) {
         const token = randomBytes(32).toString('hex');
         sessionTokens.set(token, Date.now());
-        jsonResponse(res, { token });
-      } else if (!RELAY_PASSWORD && isDevMode()) {
-        const token = randomBytes(32).toString('hex');
-        sessionTokens.set(token, Date.now());
-        jsonResponse(res, { token });
+        setSessionCookie(res, token, req);
+        jsonResponse(res, { ok: true });
       } else {
         jsonResponse(res, { error: RELAY_PASSWORD ? '密码错误' : '未配置访问密码' }, 401);
       }
@@ -161,6 +197,25 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // 登出端点：作废 session 并过期 cookie
+  if (req.url?.startsWith('/api/logout') && req.method === 'POST') {
+    const token = readSessionCookie(req);
+    if (token) sessionTokens.delete(token);
+    clearSessionCookie(res, req);
+    jsonResponse(res, { ok: true });
+    return;
+  }
+
+  // 会话探测：前端据此判断 httpOnly cookie 是否仍有效（cookie 不可被 JS 读取）
+  if (req.url?.startsWith('/api/session') && req.method === 'GET') {
+    if (!validateSessionToken(req)) {
+      jsonResponse(res, { error: '未认证' }, 401);
+      return;
+    }
+    jsonResponse(res, { ok: true });
+    return;
+  }
+
   serveStatic(staticDir, req, res);
 });
 
@@ -180,18 +235,17 @@ function getClientIp(req: http.IncomingMessage): string {
 server.on('upgrade', (req, socket, head) => {
   const ip = getClientIp(req);
   if (req.url?.startsWith('/ws/browser')) {
-    const url = new URL(req.url, 'http://localhost');
-    const token = url.searchParams.get('token');
-
-    // session token 优先验证
-    if (token && sessionTokens.has(token)) {
+    // session token 走 httpOnly cookie（浏览器在 WS 握手时自动携带同站 cookie），不再放 URL
+    const cookieToken = readSessionCookie(req);
+    if (cookieToken && sessionTokens.has(cookieToken)) {
       browserWss.handleUpgrade(req, socket, head, (ws) => {
         handleBrowserConnection(ws, ip);
       });
       return;
     }
-    // 回退到旧式 RELAY_BROWSER_TOKEN（向后兼容）
-    if (RELAY_BROWSER_TOKEN && token === RELAY_BROWSER_TOKEN) {
+    // 回退到旧式 RELAY_BROWSER_TOKEN（非浏览器 / 旧式客户端，仍走 query）
+    const queryToken = new URL(req.url, 'http://localhost').searchParams.get('token');
+    if (RELAY_BROWSER_TOKEN && queryToken === RELAY_BROWSER_TOKEN) {
       browserWss.handleUpgrade(req, socket, head, (ws) => {
         handleBrowserConnection(ws, ip);
       });
@@ -204,7 +258,7 @@ server.on('upgrade', (req, socket, head) => {
       });
       return;
     }
-    console.warn(`[relay] 浏览器 WebSocket 认证失败: 无有效 token | IP: ${ip}`);
+    console.warn(`[relay] 浏览器 WebSocket 认证失败: 无有效 session | IP: ${ip}`);
     socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
     socket.destroy();
   } else if (req.url === '/ws/local') {

@@ -53,58 +53,48 @@ function useIsMobile() {
 
 export function ChatView() {
   // ---- 登录状态 ----
-  const SESSION_TOKEN_KEY = "cc-web-session-token";
-  const [sessionToken, setSessionToken] = useState<string | null>(null);
+  const [authed, setAuthed] = useState(false);
   const [loginPassword, setLoginPassword] = useState("");
   const [loginError, setLoginError] = useState<string | null>(null);
   const [loginLoading, setLoginLoading] = useState(false);
 
-  const { connected, send, onRawMessage } = useWebSocket(sessionToken);
+  const { connected, send, onRawMessage } = useWebSocket(authed);
   const { processStreamLine } = useClaudeStreaming();
 
-  // 清除登录态：token 过期或主动登出时调用，重置加载守卫以便重新登录后能正常加载数据
+  // 清除登录态：session 失效或主动登出时调用，重置加载守卫以便重新登录后能正常加载数据
   const clearSession = useCallback(() => {
-    try { localStorage.removeItem(SESSION_TOKEN_KEY); } catch { /* localStorage 不可用 */ }
     initialLoadDone.current = false;
-    setSessionToken(null);
+    setAuthed(false);
   }, []);
 
+  // 所有受保护接口走 httpOnly cookie（credentials:'include'），token 不进 JS
   const authFetch = useCallback((url: string) => {
-    return fetch(url, { headers: { 'Authorization': `Bearer ${sessionToken!}` } }).then((resp) => {
-      // session token 过期或无效 → 清除并回到登录页
+    return fetch(url, { credentials: 'include' }).then((resp) => {
+      // session 失效 → 清除并回到登录页
       if (resp.status === 401) {
         clearSession();
         throw new Error('SESSION_EXPIRED');
       }
       return resp;
     });
-  }, [sessionToken, clearSession]);
+  }, [clearSession]);
 
-  // 初始化：优先恢复已有 session，否则尝试无密码自动登录（dev 模式 relay 无密码时）
+  // 初始化：httpOnly cookie 不可被 JS 读取，先探测现有 session；未登录时尝试 dev 无密码自动登录
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem(SESSION_TOKEN_KEY);
-      if (saved) {
-        setSessionToken(saved);
-        return;
-      }
-    } catch { /* localStorage 不可用，走自动登录 */ }
-
     (async () => {
       try {
-        const resp = await fetch("/api/login", {
+        const r = await fetch("/api/session", { credentials: "include" });
+        if (r.ok) { setAuthed(true); return; }
+      } catch { /* 网络异常，继续尝试自动登录 */ }
+      try {
+        const r = await fetch("/api/login", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ password: "" }),
+          credentials: "include",
         });
-        if (resp.ok) {
-          const data = await resp.json();
-          if (data.token) {
-            try { localStorage.setItem(SESSION_TOKEN_KEY, data.token); } catch {}
-            setSessionToken(data.token);
-          }
-        }
-      } catch { /* 登录失败不处理，用户手动登录 */ }
+        if (r.ok) setAuthed(true);
+      } catch { /* 停留在登录页 */ }
     })();
   }, []);
 
@@ -116,11 +106,10 @@ export function ChatView() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ password: loginPassword }),
+        credentials: "include",
       });
       if (resp.ok) {
-        const data = await resp.json();
-        try { localStorage.setItem(SESSION_TOKEN_KEY, data.token); } catch {}
-        setSessionToken(data.token);
+        setAuthed(true);
       } else {
         const data = await resp.json();
         setLoginError(data.error || "登录失败");
@@ -133,6 +122,7 @@ export function ChatView() {
   }, [loginPassword]);
 
   const handleLogout = useCallback(() => {
+    fetch("/api/logout", { method: "POST", credentials: "include" }).catch(() => {});
     clearSession();
   }, [clearSession]);
 
@@ -243,7 +233,7 @@ export function ChatView() {
 
   // 初始加载节点列表和项目列表（通过 HTTP，可靠）
   useEffect(() => {
-    if (!sessionToken || initialLoadDone.current) return;
+    if (!authed || initialLoadDone.current) return;
     initialLoadDone.current = true;
 
     const saved = loadLastView();
@@ -336,7 +326,7 @@ export function ChatView() {
         })
         .catch(() => {});
     }
-  }, [sessionToken, authFetch]);
+  }, [authed, authFetch]);
 
   // 持久化当前浏览状态
   useEffect(() => {
@@ -1146,7 +1136,7 @@ export function ChatView() {
   );
 
   // 未登录时显示登录表单
-  if (!sessionToken) {
+  if (!authed) {
     return (
       <div className="flex h-full items-center justify-center bg-slate-50 dark:bg-slate-900">
         <div className="w-full max-w-sm p-8">

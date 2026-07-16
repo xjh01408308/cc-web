@@ -7,7 +7,7 @@ interface UseWebSocketReturn {
   onRawMessage: (cb: (raw: string) => void) => void;
 }
 
-export function useWebSocket(sessionToken: string | null): UseWebSocketReturn {
+export function useWebSocket(authed: boolean): UseWebSocketReturn {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectDelay = useRef(2000);
@@ -23,10 +23,10 @@ export function useWebSocket(sessionToken: string | null): UseWebSocketReturn {
 
   const connect = useCallback(() => {
     if (!mounted.current) return;
-    if (!sessionToken) return; // 未登录时不连接，避免生产模式无 token 被拒后无限重连
+    if (!authed) return; // 未登录时不连接，避免被拒后无限重连
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
-    const url = getWsUrl(sessionToken);
+    const url = getWsUrl();
     const ws = new WebSocket(url);
 
     ws.onopen = () => {
@@ -67,7 +67,7 @@ export function useWebSocket(sessionToken: string | null): UseWebSocketReturn {
     };
 
     wsRef.current = ws;
-  }, [sessionToken]);
+  }, [authed]);
 
   const send = useCallback((data: unknown) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
