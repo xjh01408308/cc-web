@@ -224,10 +224,9 @@ export type {
   FileTreeNode,
   FileTreeResult,
   FileContentResult,
+  ChatRequest,
+  ProjectsResponse,
 } from "@cc-web/shared";
-
-// ChatRequest / ProjectsResponse 暂仍来自 legacy shared/types（不在本次迁移范围）
-export type { ChatRequest, ProjectsResponse } from "../../shared/types";
 
 // Re-export SDK types
 export type {

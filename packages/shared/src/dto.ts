@@ -89,3 +89,18 @@ export interface FileContentResult {
   language?: string;
   error?: string;
 }
+
+/** Chat 请求体（REST 契约，浏览器 POST） */
+export interface ChatRequest {
+  message: string;
+  sessionId?: string;
+  requestId: string;
+  allowedTools?: string[];
+  workingDirectory?: string;
+  permissionMode?: "default" | "plan" | "acceptEdits";
+}
+
+/** 项目列表响应体（REST 契约） */
+export interface ProjectsResponse {
+  projects: ProjectInfo[];
+}

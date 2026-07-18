@@ -6,11 +6,6 @@ import { resolve } from "path";
 export default defineConfig({
   envDir: resolve(__dirname, "../.."),
   plugins: [react(), tailwindcss()],
-  resolve: {
-    alias: {
-      "@shared": resolve(__dirname, "../shared"),
-    },
-  },
   server: {
     host: "0.0.0.0",
     port: 5173,
