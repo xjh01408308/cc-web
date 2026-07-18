@@ -1,10 +1,5 @@
-// 与 claude-code-webui shared/types.ts 完全兼容
-
-export interface StreamResponse {
-  type: "claude_json" | "error" | "done" | "aborted";
-  data?: unknown; // SDKMessage object for claude_json type
-  error?: string;
-}
+// legacy: frontend 仍从此导入 ChatRequest / ProjectsResponse（及其依赖的 ProjectInfo）。
+// DTO（SessionInfo / Git* / File* / StreamResponse 等）的 canonical 定义在 @cc-web/shared/src/dto.ts。
 
 export interface ChatRequest {
   message: string;
@@ -52,52 +47,4 @@ export interface ConversationHistory {
     endTime: string;
     messageCount: number;
   };
-}
-
-// Git status / diff types
-export interface GitStatusFile {
-  path: string;
-  staged: string;       // X column (index)
-  unstaged: string;     // Y column (working tree)
-  displayPath: string;  // renamed files "old -> new"
-}
-
-export interface GitStatusResult {
-  projectPath: string;
-  projectId: string;
-  isGitRepo: boolean;
-  error?: string;
-  staged: GitStatusFile[];
-  unstaged: GitStatusFile[];
-  untracked: GitStatusFile[];
-}
-
-export interface GitDiffResult {
-  projectPath: string;
-  filePath: string;
-  diff: string;         // unified diff text
-  error?: string;
-}
-
-export interface FileTreeNode {
-  name: string;
-  path: string;
-  isDirectory: boolean;
-  children?: FileTreeNode[];
-}
-
-export interface FileTreeResult {
-  projectPath: string;
-  projectId: string;
-  tree: FileTreeNode[];
-  error?: string;
-}
-
-export interface FileContentResult {
-  projectPath: string;
-  filePath: string;
-  content: string;
-  mimeType: 'markdown' | 'html' | 'code' | 'text' | 'binary';
-  language?: string;
-  error?: string;
 }

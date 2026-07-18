@@ -1,30 +1,26 @@
-// 与 claude-code-webui shared/types.ts 兼容的 StreamResponse
-export interface StreamResponse {
-  type: 'claude_json' | 'error' | 'done' | 'aborted';
-  data?: unknown;
-  error?: string;
-}
+// 三端共享的 DTO 集中在 @cc-web/shared；本文件仅保留 local 自有的 WSMessage。
+// SessionInfo 以 @cc-web/shared 的 canonical 形状为准（含 model? / permissionMode? / messages?: StreamResponse[]）。
 
-export interface ProjectInfo {
-  projectId: string;
-  name: string;
-  path: string;
-  sessionCount: number;
-  createdAt: number;
-}
+export type {
+  StreamResponse,
+  ProjectInfo,
+  SessionInfo,
+  GitStatusFile,
+  GitStatusResult,
+  GitDiffResult,
+  FileTreeNode,
+  FileTreeResult,
+  FileContentResult,
+} from '@cc-web/shared';
 
-export interface SessionInfo {
-  sessionId: string;
-  projectId: string;
-  projectPath: string;
-  model?: string;
-  permissionMode?: string;
-  summary: string;
-  status: 'idle' | 'running' | 'error';
-  messageCount: number;
-  createdAt: number;
-  messages?: StreamResponse[];
-}
+import type {
+  SessionInfo,
+  ProjectInfo,
+  GitStatusResult,
+  GitDiffResult,
+  FileTreeResult,
+  FileContentResult,
+} from '@cc-web/shared';
 
 export interface WSMessage {
   type: string;
@@ -49,51 +45,4 @@ export interface WSMessage {
   diffResult?: GitDiffResult;
   fileTreeResult?: FileTreeResult;
   fileContentResult?: FileContentResult;
-}
-
-export interface GitStatusFile {
-  path: string;
-  staged: string;
-  unstaged: string;
-  displayPath: string;
-}
-
-export interface GitStatusResult {
-  projectPath: string;
-  projectId: string;
-  isGitRepo: boolean;
-  error?: string;
-  staged: GitStatusFile[];
-  unstaged: GitStatusFile[];
-  untracked: GitStatusFile[];
-}
-
-export interface GitDiffResult {
-  projectPath: string;
-  filePath: string;
-  diff: string;
-  error?: string;
-}
-
-export interface FileTreeNode {
-  name: string;
-  path: string;
-  isDirectory: boolean;
-  children?: FileTreeNode[];
-}
-
-export interface FileTreeResult {
-  projectPath: string;
-  projectId: string;
-  tree: FileTreeNode[];
-  error?: string;
-}
-
-export interface FileContentResult {
-  projectPath: string;
-  filePath: string;
-  content: string;
-  mimeType: 'markdown' | 'html' | 'code' | 'text' | 'binary';
-  language?: string;
-  error?: string;
 }

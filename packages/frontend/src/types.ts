@@ -212,18 +212,21 @@ export type PlanApprovalResult =
   | { success: true; sessionId: string }
   | { success: false; error: PlanApprovalError };
 
-// Re-export shared types (ProjectInfo is defined here to match new schema)
+// DTO 统一从 @cc-web/shared 导入（SessionInfo / ProjectInfo 等不再在此重复定义）
 export type {
   StreamResponse,
-  ChatRequest,
-  ProjectsResponse,
+  ProjectInfo,
+  SessionInfo,
   GitStatusFile,
   GitStatusResult,
   GitDiffResult,
   FileTreeNode,
   FileTreeResult,
   FileContentResult,
-} from "../../shared/types";
+} from "@cc-web/shared";
+
+// ChatRequest / ProjectsResponse 暂仍来自 legacy shared/types（不在本次迁移范围）
+export type { ChatRequest, ProjectsResponse } from "../../shared/types";
 
 // Re-export SDK types
 export type {
@@ -233,9 +236,6 @@ export type {
   SDKAssistantMessage,
   SDKUserMessage,
 } from "@anthropic-ai/claude-code";
-
-// Import for use in local types
-import type { StreamResponse } from "../../shared/types";
 
 // ====== cc-web WS 协议消息类型 ======
 
@@ -377,28 +377,3 @@ export type WSBrowserMessage =
   | WSGetGitDiffMessage
   | WSGetFileTreeMessage
   | WSGetFileContentMessage;
-
-// 项目信息
-export interface ProjectInfo {
-  projectId: string;
-  name: string;
-  path: string;
-  nodeId?: string;
-  sessionCount: number;
-  createdAt: number;
-}
-
-// 会话信息
-export interface SessionInfo {
-  sessionId: string;
-  projectId: string;
-  projectPath: string;
-  nodeId?: string;
-  model?: string;
-  permissionMode?: string;
-  summary: string;
-  status: "idle" | "running" | "error";
-  messageCount: number;
-  createdAt: number;
-  messages?: StreamResponse[];
-}
