@@ -217,6 +217,7 @@ export type {
   StreamResponse,
   ProjectInfo,
   SessionInfo,
+  NodeInfo,
   GitStatusFile,
   GitStatusResult,
   GitDiffResult,
@@ -238,142 +239,16 @@ export type {
 } from "@anthropic-ai/claude-code";
 
 // ====== cc-web WS 协议消息类型 ======
+//
+// 浏览器侧的消息类型统一来自 @cc-web/shared：
+//   BrowserCommand — 浏览器 → 中转（useWebSocket.send 的参数类型，编译期校验）
+//   BrowserEvent   — 中转 → 浏览器（ChatView 路由消费）
+//   BrowserCommandType / BrowserEventType — as const 常量，替换此前的裸 type 字面量
+// 不再自带 WS*Message 扁平定义。
 
-// 浏览器 → 中转
-// 节点信息
-export interface NodeInfo {
-  nodeId: string;
-  sessionCount: number;
-  passwordRequired?: boolean;
-  workspaceRoot?: string;
-}
+export type {
+  BrowserCommand,
+  BrowserEvent,
+} from "@cc-web/shared";
 
-export interface WSAuthNodeMessage {
-  type: 'auth_node';
-  nodeId: string;
-  password: string;
-}
-
-export interface WSChatMessage {
-  type: "chat";
-  sessionId: string;
-  text: string;
-  nodeId?: string;
-  permissionMode?: string;
-}
-
-export interface WSCreateSessionMessage {
-  type: "create_session";
-  projectPath: string;
-  projectId?: string;
-  nodeId?: string;
-  model?: string;
-  permissionMode?: string;
-}
-
-export interface WSStopSessionMessage {
-  type: "stop_session";
-  sessionId: string;
-  nodeId?: string;
-}
-
-export interface WSDeleteSessionMessage {
-  type: "delete_session";
-  sessionId: string;
-  nodeId?: string;
-}
-
-export interface WSListSessionsMessage {
-  type: "list_sessions";
-  projectId?: string;
-  nodeId?: string;
-}
-
-export interface WSCreateProjectMessage {
-  type: "create_project";
-  name: string;
-  path: string;
-  nodeId?: string;
-}
-
-export interface WSDeleteProjectMessage {
-  type: "delete_project";
-  projectId: string;
-  nodeId?: string;
-}
-
-export interface WSListProjectsMessage {
-  type: "list_projects";
-  nodeId?: string;
-}
-
-export interface WSSelectNodeMessage {
-  type: "select_node";
-  nodeId: string;
-}
-
-export interface WSListNodesMessage {
-  type: "list_nodes";
-}
-
-export interface WSChangePermissionModeMessage {
-  type: "change_permission_mode";
-  sessionId: string;
-  permissionMode: string;
-  nodeId?: string;
-}
-
-export interface WSRetryWithPermissionMessage {
-  type: "retry_with_permission";
-  sessionId: string;
-  permissionMode: string;
-  nodeId?: string;
-}
-
-export interface WSGetGitStatusMessage {
-  type: "get_git_status";
-  projectPath: string;
-  projectId: string;
-  nodeId?: string;
-}
-
-export interface WSGetGitDiffMessage {
-  type: "get_git_diff";
-  projectPath: string;
-  filePath: string;
-  staged: boolean;
-  nodeId?: string;
-}
-
-export interface WSGetFileTreeMessage {
-  type: "get_file_tree";
-  projectPath: string;
-  projectId: string;
-  nodeId?: string;
-}
-
-export interface WSGetFileContentMessage {
-  type: "get_file_content";
-  projectPath: string;
-  filePath: string;
-  nodeId?: string;
-}
-
-export type WSBrowserMessage =
-  | WSChatMessage
-  | WSCreateSessionMessage
-  | WSStopSessionMessage
-  | WSDeleteSessionMessage
-  | WSListSessionsMessage
-  | WSCreateProjectMessage
-  | WSDeleteProjectMessage
-  | WSListProjectsMessage
-  | WSSelectNodeMessage
-  | WSListNodesMessage
-  | WSAuthNodeMessage
-  | WSRetryWithPermissionMessage
-  | WSChangePermissionModeMessage
-  | WSGetGitStatusMessage
-  | WSGetGitDiffMessage
-  | WSGetFileTreeMessage
-  | WSGetFileContentMessage;
+export { BrowserCommandType, BrowserEventType } from "@cc-web/shared";

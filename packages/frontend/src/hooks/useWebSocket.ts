@@ -1,9 +1,10 @@
 import { useEffect, useRef, useCallback, useState } from "react";
 import { getWsUrl } from "../config/ws";
+import type { BrowserCommand } from "../types";
 
 interface UseWebSocketReturn {
   connected: boolean;
-  send: (data: unknown) => void;
+  send: (data: BrowserCommand) => void;
   onRawMessage: (cb: (raw: string) => void) => void;
 }
 
@@ -13,7 +14,7 @@ export function useWebSocket(authed: boolean): UseWebSocketReturn {
   const reconnectDelay = useRef(2000);
   const mounted = useRef(true);
   const rawMessageCb = useRef<((raw: string) => void) | null>(null);
-  const pendingQueue = useRef<unknown[]>([]);
+  const pendingQueue = useRef<BrowserCommand[]>([]);
 
   const [connected, setConnected] = useState(false);
 
@@ -69,7 +70,7 @@ export function useWebSocket(authed: boolean): UseWebSocketReturn {
     wsRef.current = ws;
   }, [authed]);
 
-  const send = useCallback((data: unknown) => {
+  const send = useCallback((data: BrowserCommand) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify(data));
     } else {

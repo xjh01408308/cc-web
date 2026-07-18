@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { SessionRunner } from './sdk-runner.js';
-import type { StreamResponse, SessionInfo, ProjectInfo } from './types.js';
+import type { StreamResponse, SessionInfo, ProjectInfo, LocalEvent } from './types.js';
+import { LocalEventType } from './types.js';
 import { send, isConnected } from './ws-client.js';
 import * as db from './db.js';
 import { validateProjectPath } from './file-utils.js';
@@ -253,7 +254,7 @@ function createRunner(session: Session): SessionRunner {
 
       // 发送到中转（附加 sessionId）
       if (isConnected()) {
-        send({ ...resp, sessionId: session.sessionId });
+        send({ ...resp, sessionId: session.sessionId } as LocalEvent);
       }
 
       // 当收到 result 时，本轮对话结束
@@ -262,7 +263,7 @@ function createRunner(session: Session): SessionRunner {
         db.updateSessionStatus(session.sessionId, "idle");
         db.incrementMessageCount(session.sessionId);
         if (isConnected()) {
-          send({ type: "done", sessionId: session.sessionId });
+          send({ type: LocalEventType.Done, sessionId: session.sessionId });
         }
         saveMessages(session);
       }
@@ -301,7 +302,7 @@ export function sendMessage(
     session.status = 'error';
     db.updateSessionStatus(sessionId, 'error');
     if (isConnected()) {
-      send({ type: 'error', sessionId, error: 'Claude CLI 进程异常' });
+      send({ type: LocalEventType.Error, sessionId, error: 'Claude CLI 进程异常' });
     }
     return false;
   }
@@ -360,7 +361,7 @@ export function switchPermissionMode(sessionId: string, mode: string): boolean {
   // 通知前端模式已切换
   if (isConnected()) {
     send({
-      type: 'session_info',
+      type: LocalEventType.SessionInfo,
       sessionId,
       projectId: session.projectId,
       projectPath: session.projectPath,
@@ -436,7 +437,7 @@ export function stopSession(sessionId: string): boolean {
   saveMessages(session);
 
   if (isConnected()) {
-    send({ type: 'session_end', sessionId, reason: 'stopped' });
+    send({ type: LocalEventType.SessionEnd, sessionId, reason: 'stopped' });
   }
 
   return true;

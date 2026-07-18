@@ -1,8 +1,10 @@
 import { WebSocket } from 'ws';
 import { readFileSync } from 'node:fs';
 import { RELAY_URL, RELAY_TOKEN, NODE_ID, NODE_PASSWORD, WORKSPACE_ROOT, RECONNECT_DELAY, MAX_RECONNECT_DELAY, RELAY_CA_CERT } from './config.js';
+import type { LocalCommand, LocalControl, LocalEvent } from './types.js';
+import { LocalEventType, LocalControlType } from './types.js';
 
-type MessageHandler = (msg: { type: string; [key: string]: unknown }) => void;
+type MessageHandler = (msg: LocalCommand | LocalControl) => void;
 
 const READY_STATE_LABEL: Record<number, string> = {
   0: 'CONNECTING', 1: 'OPEN', 2: 'CLOSING', 3: 'CLOSED',
@@ -19,7 +21,7 @@ export function onMessage(handler: MessageHandler): void {
   handlers.push(handler);
 }
 
-export function send(data: unknown): boolean {
+export function send(data: LocalEvent): boolean {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(data));
     return true;
@@ -57,14 +59,14 @@ function connect(): void {
     reconnectAttempt = 0;  // 连接成功后重置重连计数
 
     // 注册
-    send({ type: 'register', nodeId: NODE_ID, token: RELAY_TOKEN, passwordRequired: !!NODE_PASSWORD, workspaceRoot: WORKSPACE_ROOT });
+    send({ type: LocalEventType.Register, nodeId: NODE_ID, token: RELAY_TOKEN, passwordRequired: !!NODE_PASSWORD, workspaceRoot: WORKSPACE_ROOT });
   });
 
   ws.on('message', (raw) => {
     try {
       const msg = JSON.parse(raw.toString());
-      if (msg.type === 'ping') {
-        send({ type: 'pong' });
+      if (msg.type === LocalControlType.Ping) {
+        send({ type: LocalEventType.Pong });
         return;
       }
       for (const handler of handlers) {

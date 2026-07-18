@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from "react";
-import type { AllMessage, ChatMessage, SessionInfo, ProjectInfo, NodeInfo, GitStatusResult, GitDiffResult, FileTreeNode, FileTreeResult, FileContentResult } from "../types";
+import type { AllMessage, ChatMessage, SessionInfo, ProjectInfo, NodeInfo, GitStatusResult, GitDiffResult, FileTreeNode, FileTreeResult, FileContentResult, BrowserEvent } from "../types";
+import { BrowserCommandType, BrowserEventType } from "../types";
 import { useWebSocket } from "../hooks/useWebSocket";
 import { useClaudeStreaming } from "../hooks/useClaudeStreaming";
 import type { StreamingContext } from "../hooks/streaming/useMessageProcessor";
@@ -347,7 +348,7 @@ export function ChatView() {
         if (autoAuthTimeoutRef.current) clearTimeout(autoAuthTimeoutRef.current);
         setAutoAuthInProgress(true);
         setAuthError(null);
-        send({ type: 'auth_node', nodeId: pendingAuthNodeId, password: savedPassword });
+        send({ type: BrowserCommandType.AuthNode, nodeId: pendingAuthNodeId, password: savedPassword });
         autoAuthTimeoutRef.current = setTimeout(() => {
           setAutoAuthInProgress(false);
           autoAuthTimeoutRef.current = null;
@@ -386,8 +387,8 @@ export function ChatView() {
       const needSessions = sessionsRef.current.length === 0;
 
       if (needProjects || needSessions) {
-        if (needProjects) send({ type: "list_projects", nodeId: activeNodeId });
-        if (needSessions) send({ type: "list_sessions", nodeId: activeNodeId });
+        if (needProjects) send({ type: BrowserCommandType.ListProjects, nodeId: activeNodeId });
+        if (needSessions) send({ type: BrowserCommandType.ListSessions, nodeId: activeNodeId });
 
         // 2 秒后如果数据还没到就重试，最多 3 次
         loadRetryCountRef.current = 0;
@@ -397,8 +398,8 @@ export function ChatView() {
           const stillNeedSessions = sessionsRef.current.length === 0;
           if (!stillNeedProjects && !stillNeedSessions) return;
           loadRetryCountRef.current++;
-          if (stillNeedProjects) send({ type: "list_projects", nodeId: activeNodeId });
-          if (stillNeedSessions) send({ type: "list_sessions", nodeId: activeNodeId });
+          if (stillNeedProjects) send({ type: BrowserCommandType.ListProjects, nodeId: activeNodeId });
+          if (stillNeedSessions) send({ type: BrowserCommandType.ListSessions, nodeId: activeNodeId });
           loadRetryRef.current = setTimeout(doRetry, 2000);
         };
         loadRetryRef.current = setTimeout(doRetry, 2000);
@@ -419,11 +420,11 @@ export function ChatView() {
 
       for (const line of lines) {
         try {
-          const data = JSON.parse(line);
+          const data = JSON.parse(line) as BrowserEvent;
 
           // 节点列表更新
-          if (data.type === "nodes_list" && data.nodes) {
-            const nodeList = data.nodes as NodeInfo[];
+          if (data.type === BrowserEventType.NodesList && data.nodes) {
+            const nodeList = data.nodes;
             setNodes(nodeList);
             // 只有一个节点时自动选中；当前选中节点不在线时清空
             if (nodeList.length === 1) {
@@ -435,8 +436,8 @@ export function ChatView() {
           }
 
           // 认证结果
-          if (data.type === "auth_result") {
-            const resultNodeId = data.nodeId as string;
+          if (data.type === BrowserEventType.AuthResult) {
+            const resultNodeId = data.nodeId;
             if (data.success) {
               setAuthenticatedNodes((prev) => {
                 const next = new Set(prev);
@@ -470,41 +471,42 @@ export function ChatView() {
           }
 
           // 节点密码认证拦截（WS 路径）：触发自动认证或弹出密码框
-          if (data.type === "auth_required" && data.nodeId) {
-            setPendingAuthNodeId(data.nodeId as string);
+          if (data.type === BrowserEventType.AuthRequired && data.nodeId) {
+            setPendingAuthNodeId(data.nodeId);
             setIsLoading(false);
             setTaskProgress(null);
             continue;
           }
 
           // 按 nodeId 过滤：消息附带 nodeId 且与当前选中节点不匹配时跳过
-          if (data.nodeId && activeNodeId && data.nodeId !== activeNodeId) {
+          if ('nodeId' in data && data.nodeId && activeNodeId && data.nodeId !== activeNodeId) {
             continue;
           }
 
-          if (data.type === "projects_list" && data.projects) {
+          if (data.type === BrowserEventType.ProjectsList && data.projects) {
             setProjects(data.projects);
             continue;
           }
 
-          if (data.type === "project_info" && data.project) {
+          if (data.type === BrowserEventType.ProjectInfo && data.project) {
+            const project = data.project;
             setProjects((prev) => {
-              const idx = prev.findIndex((p) => p.projectId === data.project.projectId);
+              const idx = prev.findIndex((p) => p.projectId === project.projectId);
               if (idx >= 0) {
                 const updated = [...prev];
-                updated[idx] = data.project;
+                updated[idx] = project;
                 return updated;
               }
-              return [...prev, data.project];
+              return [...prev, project];
             });
             continue;
           }
 
-          if (data.type === "session_info") {
+          if (data.type === BrowserEventType.SessionInfo) {
             const info: SessionInfo = {
               sessionId: data.sessionId || "",
               projectId: data.projectId || "",
-              projectPath: data.projectPath || data.cwd || "",
+              projectPath: data.projectPath || "",
               model: data.model || undefined,
               permissionMode: data.permissionMode || undefined,
               summary: data.summary || "",
@@ -543,12 +545,12 @@ export function ChatView() {
             continue;
           }
 
-          if (data.type === "sessions_list" && data.sessions) {
+          if (data.type === BrowserEventType.SessionsList && data.sessions) {
             setSessions(data.sessions);
             // 如果有待加载的会话，将其历史消息加载到聊天视图
             const pendingId = pendingSessionRef.current;
             if (pendingId) {
-              const targetSession = (data.sessions as SessionInfo[]).find(
+              const targetSession = data.sessions.find(
                 (s) => s.sessionId === pendingId,
               );
               if (targetSession) {
@@ -583,8 +585,8 @@ export function ChatView() {
             continue;
           }
 
-          if (data.type === "git_status" && data.gitStatus) {
-            const status = data.gitStatus as GitStatusResult;
+          if (data.type === BrowserEventType.GitStatus && data.gitStatus) {
+            const status = data.gitStatus;
             setGitStatuses((prev) => {
               const next = new Map(prev);
               next.set(status.projectId, status);
@@ -593,8 +595,8 @@ export function ChatView() {
             continue;
           }
 
-          if (data.type === "git_diff" && data.diffResult) {
-            const dr = data.diffResult as GitDiffResult;
+          if (data.type === BrowserEventType.GitDiff && data.diffResult) {
+            const dr = data.diffResult;
             if (!dr.error) {
               setDiffState({
                 filePath: dr.filePath,
@@ -606,8 +608,8 @@ export function ChatView() {
             continue;
           }
 
-          if (data.type === "file_tree" && data.fileTreeResult) {
-            const result = data.fileTreeResult as FileTreeResult;
+          if (data.type === BrowserEventType.FileTree && data.fileTreeResult) {
+            const result = data.fileTreeResult;
             setFileTreeLoading((prev) => {
               const next = new Set(prev);
               next.delete(result.projectId);
@@ -634,8 +636,8 @@ export function ChatView() {
             continue;
           }
 
-          if (data.type === "file_content" && data.fileContentResult) {
-            const r = data.fileContentResult as FileContentResult;
+          if (data.type === BrowserEventType.FileContent && data.fileContentResult) {
+            const r = data.fileContentResult;
             if (!r.error) {
               setFileViewState({
                 filePath: r.filePath,
@@ -648,20 +650,20 @@ export function ChatView() {
             continue;
           }
 
-          if (data.type === "session_end") {
+          if (data.type === BrowserEventType.SessionEnd) {
             setIsLoading(false);
             currentAssistantMessageRef.current = null;
             continue;
           }
 
           if (
-            data.type === "claude_json" ||
-            data.type === "error" ||
-            data.type === "done" ||
-            data.type === "aborted"
+            data.type === BrowserEventType.ClaudeJson ||
+            data.type === BrowserEventType.Error ||
+            data.type === BrowserEventType.Done ||
+            data.type === BrowserEventType.Aborted
           ) {
             // 刷新后正在运行的会话继续发送流式消息，自动恢复 activeSessionId
-            const streamSid = data.sessionId as string | undefined;
+            const streamSid = data.sessionId;
             if (streamSid && !activeSessionIdRef.current) {
               setActiveSessionId(streamSid);
             }
@@ -706,7 +708,7 @@ export function ChatView() {
 
             processStreamLine(JSON.stringify(data), streamingContext);
 
-            if (data.type === "claude_json" && data.data) {
+            if (data.type === BrowserEventType.ClaudeJson && data.data) {
               const sdkMsg = data.data as Record<string, unknown>;
               if (sdkMsg.type === "system" && sdkMsg.subtype === "init" && sdkMsg.model) {
                 setModel(String(sdkMsg.model));
@@ -732,9 +734,9 @@ export function ChatView() {
             }
 
             if (
-              data.type === "done" ||
-              data.type === "error" ||
-              data.type === "aborted"
+              data.type === BrowserEventType.Done ||
+              data.type === BrowserEventType.Error ||
+              data.type === BrowserEventType.Aborted
             ) {
               setIsLoading(false);
               setTaskProgress(null);
@@ -765,7 +767,7 @@ export function ChatView() {
         setAutoAuthInProgress(true);
         setPendingAuthNodeId(nodeId);
         setAuthError(null);
-        send({ type: 'auth_node', nodeId, password: savedPassword });
+        send({ type: BrowserCommandType.AuthNode, nodeId, password: savedPassword });
         autoAuthTimeoutRef.current = setTimeout(() => {
           setAutoAuthInProgress(false);
           autoAuthTimeoutRef.current = null;
@@ -846,28 +848,28 @@ export function ChatView() {
     (nodeId: string, password: string) => {
       setAuthError(null);
       saveNodePassword(nodeId, password);
-      send({ type: 'auth_node', nodeId, password });
+      send({ type: BrowserCommandType.AuthNode, nodeId, password });
     },
     [send],
   );
 
   const handleCreateProject = useCallback(
     (name: string, projectPath: string) => {
-      send({ type: "create_project", name, path: projectPath, nodeId: activeNodeId || undefined });
+      send({ type: BrowserCommandType.CreateProject, name, path: projectPath, nodeId: activeNodeId || undefined });
     },
     [send, activeNodeId],
   );
 
   const handleDeleteProject = useCallback(
     (projectId: string) => {
-      send({ type: "delete_project", projectId, nodeId: activeNodeId || undefined });
+      send({ type: BrowserCommandType.DeleteProject, projectId, nodeId: activeNodeId || undefined });
     },
     [send, activeNodeId],
   );
 
   const handleDeleteSession = useCallback(
     (sessionId: string) => {
-      send({ type: "delete_session", sessionId, nodeId: activeNodeId || undefined });
+      send({ type: BrowserCommandType.DeleteSession, sessionId, nodeId: activeNodeId || undefined });
       if (activeSessionId === sessionId) {
         setActiveSessionId(null);
         setMessages([]);
@@ -881,7 +883,7 @@ export function ChatView() {
     (projectId: string, projectPath: string) => {
       creatingNewSessionRef.current = true;
       // acceptEdits: 自动批准文件读写，Bash 等操作仍需确认
-      send({ type: "create_session", projectId, projectPath, permissionMode: "acceptEdits", nodeId: activeNodeId || undefined });
+      send({ type: BrowserCommandType.CreateSession, projectId, projectPath, permissionMode: "acceptEdits", nodeId: activeNodeId || undefined });
     },
     [send, activeNodeId],
   );
@@ -898,7 +900,7 @@ export function ChatView() {
       setPermissionMode("");
       setPermissionDenials(null);
       setTaskProgress(null);
-      send({ type: "list_sessions", projectId, nodeId: activeNodeId || undefined });
+      send({ type: BrowserCommandType.ListSessions, projectId, nodeId: activeNodeId || undefined });
     },
     [send, activeNodeId],
   );
@@ -906,8 +908,8 @@ export function ChatView() {
   const handleSelectProject = useCallback(
     (projectId: string) => {
       setActiveProjectId(projectId);
-      send({ type: "list_projects", nodeId: activeNodeId || undefined });
-      send({ type: "list_sessions", projectId, nodeId: activeNodeId || undefined });
+      send({ type: BrowserCommandType.ListProjects, nodeId: activeNodeId || undefined });
+      send({ type: BrowserCommandType.ListSessions, projectId, nodeId: activeNodeId || undefined });
     },
     [send, activeNodeId],
   );
@@ -918,7 +920,7 @@ export function ChatView() {
       if (newMode === permissionMode) return;
       setPermissionMode(newMode);
       send({
-        type: "change_permission_mode",
+        type: BrowserCommandType.ChangePermissionMode,
         sessionId: activeSessionId,
         permissionMode: newMode,
         nodeId: activeNodeId || undefined,
@@ -994,7 +996,7 @@ export function ChatView() {
         timestamp: Date.now(),
       };
       setMessages((prev) => [...prev, userMsg]);
-      send({ type: "chat", sessionId: activeSessionId || "", text, nodeId: activeNodeId || undefined });
+      send({ type: BrowserCommandType.Chat, sessionId: activeSessionId || "", text, nodeId: activeNodeId || undefined });
       setIsLoading(true);
     },
     [activeSessionId, send, activeNodeId, handleSwitchPermissionMode, permissionMode],
@@ -1010,7 +1012,7 @@ export function ChatView() {
       const project = projects.find((p) => p.projectId === activeProjectId);
       const projectPath = project?.path || "";
       if (projectPath) {
-        send({ type: "create_session", projectId: activeProjectId, projectPath, model: newModel, permissionMode: permissionMode || "acceptEdits", nodeId: activeNodeId || undefined });
+        send({ type: BrowserCommandType.CreateSession, projectId: activeProjectId, projectPath, model: newModel, permissionMode: permissionMode || "acceptEdits", nodeId: activeNodeId || undefined });
       }
 
       const infoMsg: ChatMessage = {
@@ -1053,7 +1055,7 @@ export function ChatView() {
         timestamp: Date.now(),
       };
       setMessages((prev) => [...prev, userMsg]);
-      send({ type: "chat", sessionId: activeSessionId, text, permissionMode: permissionMode || "acceptEdits", nodeId: activeNodeId || undefined });
+      send({ type: BrowserCommandType.Chat, sessionId: activeSessionId, text, permissionMode: permissionMode || "acceptEdits", nodeId: activeNodeId || undefined });
       setIsLoading(true);
     },
     [activeSessionId, send, permissionMode, handleSlashCommand, activeNodeId, projects],
@@ -1064,7 +1066,7 @@ export function ChatView() {
     if (!activeSessionId) return;
     // 发送重试指令：后端会移除被拒回复、用 bypassPermissions 重启 CLI、重放对话
     send({
-      type: "retry_with_permission",
+      type: BrowserCommandType.RetryWithPermission,
       sessionId: activeSessionId,
       permissionMode: "bypassPermissions",
       nodeId: activeNodeId || undefined,
@@ -1087,7 +1089,7 @@ export function ChatView() {
 
   const handleAbort = useCallback(() => {
     if (activeSessionId) {
-      send({ type: "stop_session", sessionId: activeSessionId, nodeId: activeNodeId || undefined });
+      send({ type: BrowserCommandType.StopSession, sessionId: activeSessionId, nodeId: activeNodeId || undefined });
     }
     setIsLoading(false);
     currentAssistantMessageRef.current = null;
@@ -1095,7 +1097,7 @@ export function ChatView() {
 
   const handleStopSession = useCallback(
     (sessionId: string) => {
-      send({ type: "stop_session", sessionId, nodeId: activeNodeId || undefined });
+      send({ type: BrowserCommandType.StopSession, sessionId, nodeId: activeNodeId || undefined });
       setSessions((prev) =>
         prev.map((s) =>
           s.sessionId === sessionId ? { ...s, status: "idle" as const } : s,
@@ -1107,14 +1109,14 @@ export function ChatView() {
 
   const handleRequestGitStatus = useCallback(
     (projectId: string, projectPath: string) => {
-      send({ type: "get_git_status", projectPath, projectId, nodeId: activeNodeId || undefined });
+      send({ type: BrowserCommandType.GetGitStatus, projectPath, projectId, nodeId: activeNodeId || undefined });
     },
     [send, activeNodeId],
   );
 
   const handleFileClick = useCallback(
     (filePath: string, projectPath: string, staged: boolean) => {
-      send({ type: "get_git_diff", projectPath, filePath, staged, nodeId: activeNodeId || undefined });
+      send({ type: BrowserCommandType.GetGitDiff, projectPath, filePath, staged, nodeId: activeNodeId || undefined });
     },
     [send, activeNodeId],
   );
@@ -1123,14 +1125,14 @@ export function ChatView() {
     (projectPath: string, projectId: string) => {
       if (fileTrees.has(projectId)) return;
       setFileTreeLoading((prev) => new Set(prev).add(projectId));
-      send({ type: "get_file_tree", projectPath, projectId, nodeId: activeNodeId || undefined });
+      send({ type: BrowserCommandType.GetFileTree, projectPath, projectId, nodeId: activeNodeId || undefined });
     },
     [send, activeNodeId, fileTrees],
   );
 
   const handleFileTreeNodeClick = useCallback(
     (filePath: string, projectPath: string) => {
-      send({ type: "get_file_content", projectPath, filePath, nodeId: activeNodeId || undefined });
+      send({ type: BrowserCommandType.GetFileContent, projectPath, filePath, nodeId: activeNodeId || undefined });
     },
     [send, activeNodeId],
   );

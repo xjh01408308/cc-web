@@ -12,7 +12,7 @@ console.error = (...args: unknown[]) => _error(`[${ts()}]`, ...args);
 console.warn = (...args: unknown[]) => _warn(`[${ts()}]`, ...args);
 
 import { start, onMessage, send } from './ws-client.js';
-import { NODE_PASSWORD, NODE_ID, FORCE_PERMISSION_MODE, isDevMode, isNodePasswordEmpty, WORKSPACE_ROOT } from './config.js';
+import { NODE_PASSWORD, FORCE_PERMISSION_MODE, isDevMode, isNodePasswordEmpty, WORKSPACE_ROOT } from './config.js';
 import {
   createSession,
   sendMessage,
@@ -32,21 +32,22 @@ import {
 } from './session-manager.js';
 import { getGitStatus, getGitDiff } from './git-utils.js';
 import { getFileTree, getFileContent } from './file-utils.js';
+import type { LocalResponseEvent } from './types.js';
+import { LocalCommandType, LocalControlType, LocalEventType } from './types.js';
 
 // 加载持久化会话
 loadPersistedSessions();
 
 // 处理来自中转的消息
 onMessage((msg) => {
-  // 回传 _reqId（用于 HTTP API 请求-响应匹配）
-  const reqId = msg._reqId as string | undefined;
-  const reply = (data: Record<string, unknown>) => {
-    if (reqId) data._reqId = reqId;
-    send(data);
+  // 回传 _reqId（用于 HTTP API 请求-响应匹配）；reply 只接受带 _reqId 槽位的响应类事件
+  const reqId = (msg as { _reqId?: string })._reqId;
+  const reply = (data: LocalResponseEvent): void => {
+    send(reqId ? { ...data, _reqId: reqId } : data);
   };
 
   switch (msg.type) {
-    case 'registered':
+    case LocalControlType.Registered:
       console.log('已在服务中注册');
       // 重连后同步当前状态到前端
       {
@@ -55,22 +56,22 @@ onMessage((msg) => {
           ...s,
           messages: getHistory(s.sessionId) || [],
         }));
-        send({ type: 'sessions_list', sessions: sessionsWithHistory });
+        send({ type: LocalEventType.SessionsList, sessions: sessionsWithHistory });
         const projects = listProjects();
-        send({ type: 'projects_list', projects });
+        send({ type: LocalEventType.ProjectsList, projects });
       }
       break;
 
-    case 'chat': {
+    case LocalCommandType.Chat: {
       let sessionId = msg.sessionId as string | undefined;
-      const text = msg.text as string | undefined;
-      const permMode = FORCE_PERMISSION_MODE || (msg.permissionMode as string) || undefined;
+      const text = msg.text;
+      const permMode = FORCE_PERMISSION_MODE || msg.permissionMode || undefined;
       if (!text) return;
 
       // 必须有有效的项目和会话，不允许自动创建
       if (!sessionId || !getSession(sessionId)) {
         if (sessionId) {
-          send({ type: 'error', sessionId, error: '会话已过期，请刷新页面后重新创建会话' });
+          send({ type: LocalEventType.Error, sessionId, error: '会话已过期，请刷新页面后重新创建会话' });
         }
         return;
       }
@@ -83,84 +84,84 @@ onMessage((msg) => {
       generateSummary(sessionId, text);
       const ok = sendMessage(sessionId, text);
       if (!ok) {
-        send({ type: 'error', sessionId, error: `会话 ${sessionId.substring(0, 8)} 不存在` });
+        send({ type: LocalEventType.Error, sessionId, error: `会话 ${sessionId.substring(0, 8)} 不存在` });
       }
       break;
     }
 
-    case 'create_project': {
-      const name = (msg.name as string) || '';
-      const projectPath = msg.path as string;
+    case LocalCommandType.CreateProject: {
+      const name = msg.name || '';
+      const projectPath = msg.path;
       if (!name) {
-        reply({ type: 'error', error: '项目名称不能为空' });
+        reply({ type: LocalEventType.Error, error: '项目名称不能为空' });
         return;
       }
       if (!projectPath) {
-        reply({ type: 'error', error: '项目路径不能为空' });
+        reply({ type: LocalEventType.Error, error: '项目路径不能为空' });
         return;
       }
       try {
         const project = createProject(name, projectPath);
         console.log(`项目已创建: ${project.name} (${project.projectId.substring(0, 8)})`);
-        reply({ type: 'project_info', project });
+        reply({ type: LocalEventType.ProjectInfo, project });
         const projects = listProjects();
-        send({ type: 'projects_list', projects });
+        send({ type: LocalEventType.ProjectsList, projects });
       } catch (err) {
-        reply({ type: 'error', error: (err as Error).message });
+        reply({ type: LocalEventType.Error, error: (err as Error).message });
       }
       break;
     }
 
-    case 'list_projects': {
+    case LocalCommandType.ListProjects: {
       const projects = listProjects();
-      reply({ type: 'projects_list', projects });
+      reply({ type: LocalEventType.ProjectsList, projects });
       break;
     }
 
-    case 'delete_project': {
-      const projectId = msg.projectId as string;
+    case LocalCommandType.DeleteProject: {
+      const projectId = msg.projectId;
       if (!projectId) return;
       const ok = deleteProject(projectId);
       if (ok) {
         console.log(`项目已删除: ${projectId.substring(0, 8)}`);
         const projects = listProjects();
-        send({ type: 'projects_list', projects });
+        send({ type: LocalEventType.ProjectsList, projects });
       }
       break;
     }
 
-    case 'create_session': {
-      const projectId = (msg.projectId as string) || '';
-      const projectPath = msg.projectPath as string;
-      const model = (msg.model as string) || undefined;
-      const permissionMode = FORCE_PERMISSION_MODE || (msg.permissionMode as string) || undefined;
+    case LocalCommandType.CreateSession: {
+      const projectId = msg.projectId || '';
+      const projectPath = msg.projectPath;
+      const model = msg.model || undefined;
+      const permissionMode = FORCE_PERMISSION_MODE || msg.permissionMode || undefined;
       if (!projectId) {
-        reply({ type: 'error', error: '创建会话需要指定 projectId' });
+        reply({ type: LocalEventType.Error, error: '创建会话需要指定 projectId' });
         return;
       }
       if (!projectPath) {
-        reply({ type: 'error', error: '创建会话需要指定 projectPath' });
+        reply({ type: LocalEventType.Error, error: '创建会话需要指定 projectPath' });
         return;
       }
       try {
         const info = createSession(projectId, projectPath, model, permissionMode);
         console.log(`会话已创建: ${info.sessionId.substring(0, 8)} (${projectPath})${model ? `, 模型=${model}` : ""}${permissionMode ? `, 权限=${permissionMode}` : ""}`);
-        send({ type: 'session_info', ...info });
+        send({ type: LocalEventType.SessionInfo, ...info });
         const projects = listProjects();
-        send({ type: 'projects_list', projects });
+        send({ type: LocalEventType.ProjectsList, projects });
       } catch (err) {
-        reply({ type: 'error', error: (err as Error).message });
+        reply({ type: LocalEventType.Error, error: (err as Error).message });
       }
       break;
     }
 
-    case 'change_permission_mode': {
-      const sid = msg.sessionId as string;
-      const permMode = FORCE_PERMISSION_MODE || (msg.permissionMode as string);
+    case LocalCommandType.ChangePermissionMode: {
+      const sid = msg.sessionId;
+      const permMode = FORCE_PERMISSION_MODE || msg.permissionMode;
       if (sid && permMode) {
         if (permMode === 'bypassPermissions' && !FORCE_PERMISSION_MODE && !isDevMode()) {
           console.error(`[SECURITY] 拒绝远程 bypassPermissions | sessionId=${sid.substring(0, 8)}`);
-          reply({ type: 'error', error: '生产环境不允许远程设置全权限模式' });
+          reply({ type: LocalEventType.Error, error: '生产环境不允许远程设置全权限模式' });
           break;
         }
         switchPermissionMode(sid, permMode);
@@ -168,13 +169,13 @@ onMessage((msg) => {
       break;
     }
 
-    case 'retry_with_permission': {
-      const sid = msg.sessionId as string;
-      const permMode = FORCE_PERMISSION_MODE || (msg.permissionMode as string) || "bypassPermissions";
+    case LocalCommandType.RetryWithPermission: {
+      const sid = msg.sessionId;
+      const permMode = FORCE_PERMISSION_MODE || msg.permissionMode || "bypassPermissions";
       if (sid) {
         if (permMode === 'bypassPermissions' && !FORCE_PERMISSION_MODE && !isDevMode()) {
           console.error(`[SECURITY] 拒绝远程 retry bypassPermissions | sessionId=${sid.substring(0, 8)}`);
-          reply({ type: 'error', error: '生产环境不允许远程全权限重试' });
+          reply({ type: LocalEventType.Error, error: '生产环境不允许远程全权限重试' });
           break;
         }
         retryWithPermission(sid, permMode);
@@ -182,83 +183,83 @@ onMessage((msg) => {
       break;
     }
 
-    case 'stop_session': {
-      const sid = msg.sessionId as string;
+    case LocalCommandType.StopSession: {
+      const sid = msg.sessionId;
       if (sid) stopSession(sid);
       break;
     }
 
-    case 'delete_session': {
-      const sid = msg.sessionId as string;
+    case LocalCommandType.DeleteSession: {
+      const sid = msg.sessionId;
       if (!sid) return;
       const ok = deleteSession(sid);
       if (ok) {
         console.log(`会话已删除: ${sid.substring(0, 8)}`);
         const sessions = listSessions();
-        send({ type: 'sessions_list', sessions: sessions.map((s) => ({ ...s, messages: getHistory(s.sessionId) || [] })) });
+        send({ type: LocalEventType.SessionsList, sessions: sessions.map((s) => ({ ...s, messages: getHistory(s.sessionId) || [] })) });
         const projects = listProjects();
-        send({ type: 'projects_list', projects });
+        send({ type: LocalEventType.ProjectsList, projects });
       }
       break;
     }
 
-    case 'list_sessions': {
-      const projectId = msg.projectId as string | undefined;
+    case LocalCommandType.ListSessions: {
+      const projectId = msg.projectId;
       const sessions = listSessions(projectId);
       const sessionsWithHistory = sessions.map((s) => ({
         ...s,
         messages: getHistory(s.sessionId) || [],
       }));
-      reply({ type: 'sessions_list', sessions: sessionsWithHistory });
+      reply({ type: LocalEventType.SessionsList, sessions: sessionsWithHistory });
       break;
     }
 
-    case 'auth_node': {
-      const password = msg.password as string;
+    case LocalCommandType.AuthNode: {
+      const password = msg.password;
       if (!NODE_PASSWORD) {
-        reply({ type: 'auth_result', nodeId: NODE_ID, success: true });
+        reply({ type: LocalEventType.AuthResult, success: true });
       } else if (password === NODE_PASSWORD) {
-        reply({ type: 'auth_result', nodeId: NODE_ID, success: true });
+        reply({ type: LocalEventType.AuthResult, success: true });
       } else {
-        reply({ type: 'auth_result', nodeId: NODE_ID, success: false, error: '密码错误' });
+        reply({ type: LocalEventType.AuthResult, success: false, error: '密码错误' });
       }
       break;
     }
 
-    case 'get_git_status': {
-      const projectPath = msg.projectPath as string;
-      const projectId = msg.projectId as string;
+    case LocalCommandType.GetGitStatus: {
+      const projectPath = msg.projectPath;
+      const projectId = msg.projectId;
       if (!projectPath || !projectId) return;
       const status = getGitStatus(projectPath, projectId);
-      reply({ type: 'git_status', gitStatus: status });
+      reply({ type: LocalEventType.GitStatus, gitStatus: status });
       break;
     }
 
-    case 'get_git_diff': {
-      const projectPath = msg.projectPath as string;
-      const filePath = msg.filePath as string;
+    case LocalCommandType.GetGitDiff: {
+      const projectPath = msg.projectPath;
+      const filePath = msg.filePath;
       const staged = msg.staged === true;
       if (!projectPath || !filePath) return;
       const result = getGitDiff(projectPath, filePath, staged);
-      reply({ type: 'git_diff', diffResult: result, staged });
+      reply({ type: LocalEventType.GitDiff, diffResult: result, staged });
       break;
     }
 
-    case 'get_file_tree': {
-      const projectPath = msg.projectPath as string;
-      const projectId = msg.projectId as string;
+    case LocalCommandType.GetFileTree: {
+      const projectPath = msg.projectPath;
+      const projectId = msg.projectId;
       if (!projectPath || !projectId) return;
       const result = getFileTree(projectPath, projectId);
-      reply({ type: 'file_tree', fileTreeResult: result });
+      reply({ type: LocalEventType.FileTree, fileTreeResult: result });
       break;
     }
 
-    case 'get_file_content': {
-      const projectPath = msg.projectPath as string;
-      const filePath = msg.filePath as string;
+    case LocalCommandType.GetFileContent: {
+      const projectPath = msg.projectPath;
+      const filePath = msg.filePath;
       if (!projectPath || !filePath) return;
       const result = getFileContent(projectPath, filePath);
-      reply({ type: 'file_content', fileContentResult: result });
+      reply({ type: LocalEventType.FileContent, fileContentResult: result });
       break;
     }
   }

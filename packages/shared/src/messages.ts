@@ -8,8 +8,11 @@
 //   LocalEvent      — 本地 → 中转（上行第一跳）
 //   BrowserEvent    — 中转 → 浏览器（上行第二跳；relay 转发并注入 nodeId）
 //
+// 另有 LocalControl（中转 → 本地的非命令控制消息：registered / ping 心跳），
+// 与 LocalCommand 同方向但不承载业务命令，独立成联合。
+//
 // 下行命令在两跳复用的载荷抽成共享子类型（ChatPayload / CreateSessionPayload）。
-// 此 expand 阶段与各包自带 types.ts 并存，尚无代码消费。
+// 三端均直接消费本文件的 union 与常量，不再自带扁平信封类型。
 
 import type {
   SessionInfo,
@@ -313,6 +316,27 @@ export type LocalCommand =
   | LocalGetFileContentCommand;
 
 // ===========================================================================
+// LocalControl — 中转 → 本地（非命令控制：注册确认 / 心跳探测）
+// ===========================================================================
+
+export const LocalControlType = {
+  Registered: 'registered',
+  Ping: 'ping',
+} as const;
+
+/** relay 确认 local 的 register 成功 */
+export interface LocalRegisteredMessage {
+  type: typeof LocalControlType.Registered;
+}
+
+/** relay 心跳探测（local 回 LocalPongEvent） */
+export interface LocalPingMessage {
+  type: typeof LocalControlType.Ping;
+}
+
+export type LocalControl = LocalRegisteredMessage | LocalPingMessage;
+
+// ===========================================================================
 // LocalEvent — 本地 → 中转
 // ===========================================================================
 
@@ -359,6 +383,8 @@ export interface LocalErrorEvent {
   sessionId?: string;
   error: string;
   data?: unknown;
+  /** relay 请求-响应匹配（reply error 路径）；转发到浏览器时由 relay 剥离 */
+  _reqId?: string;
 }
 
 export interface LocalPongEvent {
@@ -378,6 +404,7 @@ export interface LocalSessionInfoEvent extends SessionInfo {
 export interface LocalSessionEndEvent {
   type: typeof LocalEventType.SessionEnd;
   sessionId: string;
+  reason?: string;
 }
 
 export interface LocalSessionsListEvent {
@@ -414,6 +441,7 @@ export interface LocalGitStatusEvent {
 export interface LocalGitDiffEvent {
   type: typeof LocalEventType.GitDiff;
   diffResult: GitDiffResult;
+  staged?: boolean;
   _reqId?: string;
 }
 
@@ -438,6 +466,19 @@ export type LocalEvent =
   | LocalAbortedEvent
   | LocalSessionInfoEvent
   | LocalSessionEndEvent
+  | LocalSessionsListEvent
+  | LocalProjectsListEvent
+  | LocalProjectInfoEvent
+  | LocalAuthResultEvent
+  | LocalGitStatusEvent
+  | LocalGitDiffEvent
+  | LocalFileTreeEvent
+  | LocalFileContentEvent;
+
+/** LocalEvent 中带 `_reqId` 的请求-响应类事件（local→relay，relay 据此匹配回原始请求）。
+ *  reply() 只接受这个子联合，避免给无 _reqId 的变体塞 _reqId（type hole）。 */
+export type LocalResponseEvent =
+  | LocalErrorEvent
   | LocalSessionsListEvent
   | LocalProjectsListEvent
   | LocalProjectInfoEvent
@@ -506,6 +547,7 @@ export interface BrowserSessionEndEvent {
   type: typeof BrowserEventType.SessionEnd;
   sessionId: string;
   nodeId?: string;
+  reason?: string;
 }
 
 export interface BrowserSessionsListEvent {
@@ -561,6 +603,7 @@ export interface BrowserGitStatusEvent {
 export interface BrowserGitDiffEvent {
   type: typeof BrowserEventType.GitDiff;
   diffResult: GitDiffResult;
+  staged?: boolean;
   nodeId?: string;
 }
 
