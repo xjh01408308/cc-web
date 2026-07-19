@@ -29,10 +29,6 @@ export function send(data: LocalEvent): boolean {
   return false;
 }
 
-export function isConnected(): boolean {
-  return ws !== null && ws.readyState === WebSocket.OPEN;
-}
-
 function connect(): void {
   if (ws) {
     const oldState = READY_STATE_LABEL[ws.readyState] || ws.readyState;

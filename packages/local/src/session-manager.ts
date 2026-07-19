@@ -4,10 +4,24 @@ import path from 'node:path';
 import { SessionRunner } from './sdk-runner.js';
 import type { StreamResponse, SessionInfo, ProjectInfo, LocalEvent } from './types.js';
 import { LocalEventType } from './types.js';
-import { send, isConnected } from './ws-client.js';
 import * as db from './db.js';
 import { validateProjectPath } from './file-utils.js';
 import { WORKSPACE_ROOT } from './config.js';
+
+// ─── 传输注入（依赖反转：领域层不静态 import 传输层）──────────────────────────
+// 领域层（本模块）只持有传输端点的抽象引用（Sender），由 composition root
+// （src/index.ts）在启动时调用 setTransport 注入真实传输（ws-client.send）。
+// 依赖方向：composition root → 领域层（注入传输）；领域层对传输层零静态 import。
+//
+// 默认 noop：与传输层断线时静默丢弃语义一致——传输层 send 内部已对 readyState
+// 守卫并丢弃断线消息，故领域层不再重复判断 isConnected，直接 sender(e) 即可。
+type Sender = (e: LocalEvent) => void;
+
+let sender: Sender = () => {};
+
+export function setTransport(s: Sender): void {
+  sender = s;
+}
 
 interface Session {
   sessionId: string;
@@ -253,18 +267,14 @@ function createRunner(session: Session): SessionRunner {
       }
 
       // 发送到中转（附加 sessionId）
-      if (isConnected()) {
-        send({ ...resp, sessionId: session.sessionId } as LocalEvent);
-      }
+      sender({ ...resp, sessionId: session.sessionId } as LocalEvent);
 
       // 当收到 result 时，本轮对话结束
       if (isSdkResult(resp)) {
         session.status = "idle";
         db.updateSessionStatus(session.sessionId, "idle");
         db.incrementMessageCount(session.sessionId);
-        if (isConnected()) {
-          send({ type: LocalEventType.Done, sessionId: session.sessionId });
-        }
+        sender({ type: LocalEventType.Done, sessionId: session.sessionId });
         saveMessages(session);
       }
     },
@@ -301,9 +311,7 @@ export function sendMessage(
   if (!ok) {
     session.status = 'error';
     db.updateSessionStatus(sessionId, 'error');
-    if (isConnected()) {
-      send({ type: LocalEventType.Error, sessionId, error: 'Claude CLI 进程异常' });
-    }
+    sender({ type: LocalEventType.Error, sessionId, error: 'Claude CLI 进程异常' });
     return false;
   }
 
@@ -359,20 +367,18 @@ export function switchPermissionMode(sessionId: string, mode: string): boolean {
   }
 
   // 通知前端模式已切换
-  if (isConnected()) {
-    send({
-      type: LocalEventType.SessionInfo,
-      sessionId,
-      projectId: session.projectId,
-      projectPath: session.projectPath,
-      model: session.model,
-      permissionMode: mode,
-      summary: session.summary,
-      status: session.status,
-      messageCount: session.messages.length,
-      createdAt: session.createdAt,
-    });
-  }
+  sender({
+    type: LocalEventType.SessionInfo,
+    sessionId,
+    projectId: session.projectId,
+    projectPath: session.projectPath,
+    model: session.model,
+    permissionMode: mode,
+    summary: session.summary,
+    status: session.status,
+    messageCount: session.messages.length,
+    createdAt: session.createdAt,
+  });
 
   console.log(`[session] 权限模式切换: ${sessionId.substring(0, 8)} ${oldMode || '(none)'} → ${mode}${wasRunning ? ' (重试当前消息)' : ''}`);
   return true;
@@ -436,9 +442,7 @@ export function stopSession(sessionId: string): boolean {
   db.updateSessionStatus(sessionId, 'idle');
   saveMessages(session);
 
-  if (isConnected()) {
-    send({ type: LocalEventType.SessionEnd, sessionId, reason: 'stopped' });
-  }
+  sender({ type: LocalEventType.SessionEnd, sessionId, reason: 'stopped' });
 
   return true;
 }

@@ -29,11 +29,16 @@ import {
   listProjects,
   deleteProject,
   deleteSession,
+  setTransport,
 } from './session-manager.js';
 import { getGitStatus, getGitDiff } from './git-utils.js';
 import { getFileTree, getFileContent } from './file-utils.js';
 import type { LocalResponseEvent } from './types.js';
 import { LocalCommandType, LocalControlType, LocalEventType } from './types.js';
+
+// composition root：注入传输端点到领域层（依赖反转的 wiring）。
+// 必须在任何可能触发领域层传输出口的代码之前完成，避免丢失启动早期的领域事件。
+setTransport(send);
 
 // 加载持久化会话
 loadPersistedSessions();
