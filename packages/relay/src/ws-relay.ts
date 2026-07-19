@@ -3,721 +3,553 @@ import { randomUUID } from 'node:crypto';
 import { RELAY_TOKEN, isDevMode, isUsingDefaultRelayToken } from './config.js';
 import type { BrowserCommand, LocalEvent, LocalControl } from './types.js';
 import { BrowserCommandType, LocalCommandType, LocalEventType, BrowserEventType, LocalControlType } from './types.js';
+import { ConnStates } from './conn-state.js';
+import { NodeRegistry, type NodeConn } from './node-registry.js';
+import { SessionRouter } from './session-router.js';
+import { RequestMatcher } from './request-matcher.js';
 
-// ---- 多节点数据结构 ----
-
-// relay 内部的节点连接记录（含 ws 句柄）；与 shared 的 NodeInfo DTO（无 ws）区分
-interface NodeConn {
-  ws: WebSocket;
-  nodeId: string;
-  passwordRequired: boolean;
-  workspaceRoot?: string;
-}
-
-const localNodes = new Map<string, NodeConn>();       // nodeId → NodeConn
-const sessionNodeMap = new Map<string, string>();      // sessionId → nodeId
-const browserNodeMap = new Map<WebSocket, string>();   // browser ws → nodeId
-const authenticatedBrowsers = new Map<WebSocket, Set<string>>();  // browser ws → authenticated nodeIds
-
-// 浏览器路由表（sessionId → browser clients）
-const browserSessions = new Map<string, Set<WebSocket>>();
-const allBrowsers = new Set<WebSocket>();
-
-// 认证速率限制
-const authAttempts = new Map<WebSocket, { failures: number; lastAttempt: number }>();
+// 认证速率限制（browser 连接特有；属连接处理职责，未收进 4 个 domain module）
 const MAX_AUTH_FAILURES = 5;
 const AUTH_COOLDOWN_MS = 60000;
 
-// HTTP API 请求-响应匹配
-const pendingRequests = new Map<string, (data: unknown) => void>();
+const PING_INTERVAL_MS = 30000;
+const HTTP_REQUEST_TIMEOUT_MS = 5000;
+const AUTH_TIMEOUT_MS = 5000;
+const BROWSER_REQUEST_TIMEOUT_MS = 10000;
 
-// 浏览器请求-响应匹配（防止响应广播到所有浏览器）
-interface BrowserRequestEntry {
-  ws: WebSocket;
-  timeout: ReturnType<typeof setTimeout>;
-  type: string;
-}
-const browserRequests = new Map<string, BrowserRequestEntry>();
+/**
+ * ConnectionHandler —— 原 724 行单文件的连接处理层，瘦身后仅负责：
+ *   - WS 连接生命周期（建立 / 断开清理 / 心跳）
+ *   - 浏览器←→本地消息的双向 switch 路由
+ *   - 认证速率限制
+ * 节点 / 会话订阅 / 请求匹配 / 连接附加状态分别下沉到 NodeRegistry / SessionRouter /
+ * RequestMatcher / ConnStates 四个可独立单测的深 module，本类只做组合与传输动作。
+ *
+ * 导出为 class 是为了让连接处理可独立 new 出来测；模块级单例 relay + 5 个薄委托函数
+ * 保持 index.ts 的对外调用面不变。
+ */
+export class ConnectionHandler {
+  private readonly states = new ConnStates();
+  private readonly nodes = new NodeRegistry();
+  private readonly router = new SessionRouter(
+    (ws, data) => this.send(ws, data),
+    (ws) => this.nodes.selectedNodeOfBrowser(ws),
+  );
+  private readonly matcher = new RequestMatcher();
+  private readonly authAttempts = new Map<WebSocket, { failures: number; lastAttempt: number }>();
 
-// ---- 工具函数 ----
+  // ---- 传输原语 ----
 
-function send(ws: WebSocket, data: unknown): void {
-  if (ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(data));
-  }
-}
-
-// 节点需要密码认证：发送结构化信号，前端据此弹密码框（区别于流式 error）
-function sendAuthRequired(ws: WebSocket, nodeId: string): void {
-  send(ws, { type: BrowserEventType.AuthRequired, nodeId, message: `节点 ${nodeId} 需要密码认证` });
-}
-
-function broadcastToSession(sessionId: string, data: unknown): void {
-  const clients = browserSessions.get(sessionId);
-  if (clients) {
-    for (const ws of clients) {
-      send(ws, data);
+  private send(ws: WebSocket, data: unknown): void {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(data));
     }
   }
-}
 
-function broadcastToAllBrowsers(data: unknown): void {
-  for (const ws of allBrowsers) {
-    send(ws, data);
+  private sendAuthRequired(ws: WebSocket, nodeId: string): void {
+    this.send(ws, { type: BrowserEventType.AuthRequired, nodeId, message: `节点 ${nodeId} 需要密码认证` });
   }
-}
 
-function broadcastToNodeBrowsers(nodeId: string, data: unknown): void {
-  for (const ws of allBrowsers) {
-    const selectedNode = browserNodeMap.get(ws);
-    if (!selectedNode || selectedNode === nodeId) {
-      send(ws, data);
-    }
+  private broadcastNodesList(): void {
+    this.router.broadcastToAll({ type: BrowserEventType.NodesList, nodes: this.nodes.listNodes() });
   }
-}
 
-function registerBrowserRequest(ws: WebSocket, msgType: string): string {
-  const reqId = randomUUID();
-  const timeout = setTimeout(() => {
-    if (browserRequests.has(reqId)) {
-      browserRequests.delete(reqId);
+  /**
+   * 类 A（按 msg.nodeId / 自动选择）目标解析 + 认证一体收口，消除 8 处重复。
+   * 文案差异来自原代码的分支不一致，用 opts 精确复刻：
+   *   - noSelectionError 提供 → no-selection 回该 error（Chat「未选择节点，请先选择节点」、其余「未选择节点」）；省略则静默
+   *   - offlineError=true → offline 回「节点 X 已离线」（仅 Chat/CreateSession）；省略则静默（ListSessions 等的原 quirk）
+   * 命中且已认证返回 conn；否则已自行回复错误并返回 null（调用方 return）。
+   */
+  private resolveAuthedTarget(
+    ws: WebSocket,
+    explicitNodeId: string | undefined,
+    opts: { noSelectionError?: string; offlineError?: boolean },
+  ): NodeConn | null {
+    const r = this.nodes.resolveTarget(ws, explicitNodeId);
+    if (!r.ok) {
+      if (r.reason === 'no-selection') {
+        if (opts.noSelectionError !== undefined) this.send(ws, { type: BrowserEventType.Error, error: opts.noSelectionError });
+      } else if (opts.offlineError) {
+        this.send(ws, { type: BrowserEventType.Error, error: `节点 ${r.nodeId} 已离线` });
+      }
+      return null;
     }
-  }, 10000);
-  browserRequests.set(reqId, { ws, timeout, type: msgType });
-  return reqId;
-}
-
-function broadcastNodesList(): void {
-  const nodes: Array<{ nodeId: string; sessionCount: number; passwordRequired: boolean; workspaceRoot?: string }> = [];
-  for (const [nodeId, info] of localNodes) {
-    let count = 0;
-    for (const [, nid] of sessionNodeMap) {
-      if (nid === nodeId) count++;
+    if (!this.nodes.isAuthenticated(ws, r.nodeId)) {
+      this.sendAuthRequired(ws, r.nodeId);
+      return null;
     }
-    nodes.push({ nodeId, sessionCount: count, passwordRequired: info.passwordRequired, workspaceRoot: info.workspaceRoot });
+    return r.conn;
   }
-  broadcastToAllBrowsers({ type: BrowserEventType.NodesList, nodes });
-}
 
-// 获取浏览器关联的节点 ID
-function getNodeIdForBrowser(ws: WebSocket): string | null {
-  const explicit = browserNodeMap.get(ws);
-  if (explicit && localNodes.has(explicit)) return explicit;
-  // 自动选择：只有一个节点时直接用
-  if (localNodes.size === 1) {
-    return localNodes.keys().next().value!;
+  /** 类 B（按会话找节点）目标解析：会话有绑定节点即用（离线则不执行），无绑定才 fallback 到 browser 选择 */
+  private resolveForSession(ws: WebSocket, sessionId: string | undefined): NodeConn | null {
+    if (!sessionId) return null;
+    const bySession = this.nodes.nodeForSession(sessionId);
+    let targetNodeId: string | undefined;
+    if (bySession) {
+      targetNodeId = bySession; // 即便离线也认 —— get 返回 undefined → 返回 null（与原 localNodes.get 离线静默一致）
+    } else {
+      const r = this.nodes.resolveTarget(ws);
+      targetNodeId = r.ok ? r.nodeId : undefined;
+    }
+    return targetNodeId ? (this.nodes.get(targetNodeId) ?? null) : null;
   }
-  return null;
-}
 
-function isAuthenticated(ws: WebSocket, nodeId: string): boolean {
-  const node = localNodes.get(nodeId);
-  if (!node || !node.passwordRequired) return true;
-  const authedNodes = authenticatedBrowsers.get(ws);
-  return authedNodes ? authedNodes.has(nodeId) : false;
-}
+  // ---- 浏览器消息处理 ----
 
-// ---- 浏览器消息处理 ----
-
-function handleBrowserMessage(ws: WebSocket, msg: BrowserCommand): void {
-  switch (msg.type) {
-    case BrowserCommandType.SelectNode: {
-      const nodeId = msg.nodeId;
-      if (!nodeId || !localNodes.has(nodeId)) {
-        send(ws, { type: BrowserEventType.Error, error: `节点 ${nodeId} 不在线` });
-        return;
-      }
-      browserNodeMap.set(ws, nodeId);
-      send(ws, { type: BrowserEventType.NodeSelected, nodeId });
-      return;
-    }
-
-    case BrowserCommandType.ListNodes: {
-      const nodes: Array<{ nodeId: string; sessionCount: number; passwordRequired: boolean; workspaceRoot?: string }> = [];
-      for (const [nid, info] of localNodes) {
-        let count = 0;
-        for (const [, nid2] of sessionNodeMap) {
-          if (nid2 === nid) count++;
-        }
-        nodes.push({ nodeId: nid, sessionCount: count, passwordRequired: info.passwordRequired, workspaceRoot: info.workspaceRoot });
-      }
-      send(ws, { type: BrowserEventType.NodesList, nodes });
-      return;
-    }
-
-    case BrowserCommandType.Chat: {
-      const targetNode = msg.nodeId || getNodeIdForBrowser(ws);
-      if (!targetNode) {
-        send(ws, { type: BrowserEventType.Error, error: '未选择节点，请先选择节点' });
-        return;
-      }
-      const node = localNodes.get(targetNode);
-      if (!node) {
-        send(ws, { type: BrowserEventType.Error, error: `节点 ${targetNode} 已离线` });
-        return;
-      }
-      if (!isAuthenticated(ws, targetNode)) {
-        sendAuthRequired(ws, targetNode);
-        return;
-      }
-      // 订阅该会话
-      if (msg.sessionId) {
-        if (!browserSessions.has(msg.sessionId)) {
-          browserSessions.set(msg.sessionId, new Set());
-        }
-        browserSessions.get(msg.sessionId)!.add(ws);
-        (ws as unknown as Record<string, unknown>)._sessionId = msg.sessionId;
-      }
-      send(node.ws, { type: LocalCommandType.Chat, sessionId: msg.sessionId, text: msg.text, permissionMode: msg.permissionMode, projectPath: msg.projectPath });
-      break;
-    }
-
-    case BrowserCommandType.CreateSession: {
-      const targetNode = msg.nodeId || getNodeIdForBrowser(ws);
-      if (!targetNode) {
-        send(ws, { type: BrowserEventType.Error, error: '未选择节点' });
-        return;
-      }
-      const node = localNodes.get(targetNode);
-      if (!node) {
-        send(ws, { type: BrowserEventType.Error, error: `节点 ${targetNode} 已离线` });
-        return;
-      }
-      if (!isAuthenticated(ws, targetNode)) {
-        sendAuthRequired(ws, targetNode);
-        return;
-      }
-      send(node.ws, { type: LocalCommandType.CreateSession, projectPath: msg.projectPath, projectId: msg.projectId, model: msg.model, permissionMode: msg.permissionMode });
-      break;
-    }
-
-    case BrowserCommandType.StopSession: {
-      const nodeId = msg.sessionId ? sessionNodeMap.get(msg.sessionId) : null;
-      const targetNode = nodeId || getNodeIdForBrowser(ws);
-      if (targetNode && msg.sessionId) {
-        const node = localNodes.get(targetNode);
-        if (node) {
-          if (!isAuthenticated(ws, targetNode)) {
-            sendAuthRequired(ws, targetNode);
-            return;
-          }
-          send(node.ws, { type: LocalCommandType.StopSession, sessionId: msg.sessionId });
-        }
-      }
-      break;
-    }
-
-    case BrowserCommandType.DeleteSession: {
-      const nodeId = msg.sessionId ? sessionNodeMap.get(msg.sessionId) : null;
-      const targetNode = nodeId || getNodeIdForBrowser(ws);
-      if (targetNode && msg.sessionId) {
-        const node = localNodes.get(targetNode);
-        if (node) {
-          if (!isAuthenticated(ws, targetNode)) {
-            sendAuthRequired(ws, targetNode);
-            return;
-          }
-          send(node.ws, { type: LocalCommandType.DeleteSession, sessionId: msg.sessionId });
-        }
-      }
-      break;
-    }
-
-    case BrowserCommandType.ListSessions: {
-      const targetNode = msg.nodeId || getNodeIdForBrowser(ws);
-      if (!targetNode) {
-        send(ws, { type: BrowserEventType.Error, error: '未选择节点' });
-        return;
-      }
-      const node = localNodes.get(targetNode);
-      if (!node) return;
-      if (!isAuthenticated(ws, targetNode)) {
-        sendAuthRequired(ws, targetNode);
-        return;
-      }
-      const reqId = registerBrowserRequest(ws, 'list_sessions');
-      send(node.ws, { type: LocalCommandType.ListSessions, projectId: msg.projectId, _reqId: reqId });
-      break;
-    }
-
-    case BrowserCommandType.CreateProject: {
-      const targetNode = msg.nodeId || getNodeIdForBrowser(ws);
-      if (!targetNode) {
-        send(ws, { type: BrowserEventType.Error, error: '未选择节点' });
-        return;
-      }
-      const node = localNodes.get(targetNode);
-      if (!node) return;
-      if (!isAuthenticated(ws, targetNode)) {
-        sendAuthRequired(ws, targetNode);
-        return;
-      }
-      const reqId = registerBrowserRequest(ws, 'create_project');
-      send(node.ws, { type: LocalCommandType.CreateProject, name: msg.name, path: msg.path, _reqId: reqId });
-      break;
-    }
-
-    case BrowserCommandType.DeleteProject: {
-      const targetNode = msg.nodeId || getNodeIdForBrowser(ws);
-      if (!targetNode) {
-        send(ws, { type: BrowserEventType.Error, error: '未选择节点' });
-        return;
-      }
-      const node = localNodes.get(targetNode);
-      if (!node) return;
-      if (!isAuthenticated(ws, targetNode)) {
-        sendAuthRequired(ws, targetNode);
-        return;
-      }
-      send(node.ws, { type: LocalCommandType.DeleteProject, projectId: msg.projectId });
-      break;
-    }
-
-    case BrowserCommandType.ListProjects: {
-      const targetNode = msg.nodeId || getNodeIdForBrowser(ws);
-      if (!targetNode) {
-        send(ws, { type: BrowserEventType.Error, error: '未选择节点' });
-        return;
-      }
-      const node = localNodes.get(targetNode);
-      if (!node) return;
-      if (!isAuthenticated(ws, targetNode)) {
-        sendAuthRequired(ws, targetNode);
-        return;
-      }
-      const reqId = registerBrowserRequest(ws, 'list_projects');
-      send(node.ws, { type: LocalCommandType.ListProjects, _reqId: reqId });
-      break;
-    }
-
-    case BrowserCommandType.AuthNode: {
-      const authNodeId = msg.nodeId;
-      const password = msg.password;
-
-      // 速率限制检查
-      const attempts = authAttempts.get(ws);
-      if (attempts && attempts.failures >= MAX_AUTH_FAILURES) {
-        const elapsed = Date.now() - attempts.lastAttempt;
-        if (elapsed < AUTH_COOLDOWN_MS) {
-          send(ws, { type: BrowserEventType.AuthResult, nodeId: authNodeId, success: false, error: `认证失败过多，${Math.ceil((AUTH_COOLDOWN_MS - elapsed) / 1000)}秒后重试` });
+  private handleBrowserMessage(ws: WebSocket, msg: BrowserCommand): void {
+    switch (msg.type) {
+      case BrowserCommandType.SelectNode: {
+        const nodeId = msg.nodeId;
+        if (!nodeId || !this.nodes.has(nodeId)) {
+          this.send(ws, { type: BrowserEventType.Error, error: `节点 ${nodeId} 不在线` });
           return;
         }
-        attempts.failures = 0;
-      }
-
-      if (!authNodeId || !localNodes.has(authNodeId)) {
-        send(ws, { type: BrowserEventType.Error, error: `节点 ${authNodeId} 不在线` });
+        this.nodes.selectNodeForBrowser(ws, nodeId);
+        this.send(ws, { type: BrowserEventType.NodeSelected, nodeId });
         return;
       }
-      const authNode = localNodes.get(authNodeId)!;
+
+      case BrowserCommandType.ListNodes: {
+        this.send(ws, { type: BrowserEventType.NodesList, nodes: this.nodes.listNodes() });
+        return;
+      }
+
+      case BrowserCommandType.Chat: {
+        const conn = this.resolveAuthedTarget(ws, msg.nodeId, { noSelectionError: '未选择节点，请先选择节点', offlineError: true });
+        if (!conn) return;
+        if (msg.sessionId) {
+          this.router.subscribe(msg.sessionId, ws);
+          this.states.setSessionId(ws, msg.sessionId);
+        }
+        this.send(conn.ws, { type: LocalCommandType.Chat, sessionId: msg.sessionId, text: msg.text, permissionMode: msg.permissionMode, projectPath: msg.projectPath });
+        break;
+      }
+
+      case BrowserCommandType.CreateSession: {
+        const conn = this.resolveAuthedTarget(ws, msg.nodeId, { noSelectionError: '未选择节点', offlineError: true });
+        if (!conn) return;
+        this.send(conn.ws, { type: LocalCommandType.CreateSession, projectPath: msg.projectPath, projectId: msg.projectId, model: msg.model, permissionMode: msg.permissionMode });
+        break;
+      }
+
+      case BrowserCommandType.StopSession: {
+        const conn = this.resolveForSession(ws, msg.sessionId);
+        if (conn) {
+          if (!this.nodes.isAuthenticated(ws, conn.nodeId)) {
+            this.sendAuthRequired(ws, conn.nodeId);
+            return;
+          }
+          this.send(conn.ws, { type: LocalCommandType.StopSession, sessionId: msg.sessionId });
+        }
+        break;
+      }
+
+      case BrowserCommandType.DeleteSession: {
+        const conn = this.resolveForSession(ws, msg.sessionId);
+        if (conn) {
+          if (!this.nodes.isAuthenticated(ws, conn.nodeId)) {
+            this.sendAuthRequired(ws, conn.nodeId);
+            return;
+          }
+          this.send(conn.ws, { type: LocalCommandType.DeleteSession, sessionId: msg.sessionId });
+        }
+        break;
+      }
+
+      case BrowserCommandType.ListSessions: {
+        const conn = this.resolveAuthedTarget(ws, msg.nodeId, { noSelectionError: '未选择节点' });
+        if (!conn) return;
+        this.send(conn.ws, { type: LocalCommandType.ListSessions, projectId: msg.projectId, _reqId: this.matcher.registerBrowser(ws, 'list_sessions', BROWSER_REQUEST_TIMEOUT_MS) });
+        break;
+      }
+
+      case BrowserCommandType.CreateProject: {
+        const conn = this.resolveAuthedTarget(ws, msg.nodeId, { noSelectionError: '未选择节点' });
+        if (!conn) return;
+        this.send(conn.ws, { type: LocalCommandType.CreateProject, name: msg.name, path: msg.path, _reqId: this.matcher.registerBrowser(ws, 'create_project', BROWSER_REQUEST_TIMEOUT_MS) });
+        break;
+      }
+
+      case BrowserCommandType.DeleteProject: {
+        const conn = this.resolveAuthedTarget(ws, msg.nodeId, { noSelectionError: '未选择节点' });
+        if (!conn) return;
+        this.send(conn.ws, { type: LocalCommandType.DeleteProject, projectId: msg.projectId });
+        break;
+      }
+
+      case BrowserCommandType.ListProjects: {
+        const conn = this.resolveAuthedTarget(ws, msg.nodeId, { noSelectionError: '未选择节点' });
+        if (!conn) return;
+        this.send(conn.ws, { type: LocalCommandType.ListProjects, _reqId: this.matcher.registerBrowser(ws, 'list_projects', BROWSER_REQUEST_TIMEOUT_MS) });
+        break;
+      }
+
+      case BrowserCommandType.AuthNode: {
+        const authNodeId = msg.nodeId;
+        const password = msg.password;
+
+        // 速率限制检查
+        const attempts = this.authAttempts.get(ws);
+        if (attempts && attempts.failures >= MAX_AUTH_FAILURES) {
+          const elapsed = Date.now() - attempts.lastAttempt;
+          if (elapsed < AUTH_COOLDOWN_MS) {
+            this.send(ws, { type: BrowserEventType.AuthResult, nodeId: authNodeId, success: false, error: `认证失败过多，${Math.ceil((AUTH_COOLDOWN_MS - elapsed) / 1000)}秒后重试` });
+            return;
+          }
+          attempts.failures = 0;
+        }
+
+        if (!authNodeId || !this.nodes.has(authNodeId)) {
+          this.send(ws, { type: BrowserEventType.Error, error: `节点 ${authNodeId} 不在线` });
+          return;
+        }
+        const authNode = this.nodes.get(authNodeId)!;
+        const reqId = randomUUID();
+        this.matcher.register(reqId, (resultMsg) => {
+          clearTimeout(timeout);
+          const result = resultMsg as LocalEvent;
+          const success = result.type === LocalEventType.AuthResult ? result.success : false;
+          if (success) {
+            this.authAttempts.delete(ws);
+            this.nodes.markAuthenticated(ws, authNodeId);
+          } else {
+            if (!this.authAttempts.has(ws)) this.authAttempts.set(ws, { failures: 0, lastAttempt: 0 });
+            const att = this.authAttempts.get(ws)!;
+            att.failures++;
+            att.lastAttempt = Date.now();
+          }
+          const error = result.type === LocalEventType.AuthResult ? result.error : undefined;
+          this.send(ws, { type: BrowserEventType.AuthResult, nodeId: authNodeId, success, error });
+        });
+        const timeout = setTimeout(() => {
+          if (this.matcher.has(reqId)) {
+            this.matcher.take(reqId);
+            this.send(ws, { type: BrowserEventType.AuthResult, nodeId: authNodeId, success: false, error: '认证超时' });
+          }
+        }, AUTH_TIMEOUT_MS);
+        this.send(authNode.ws, { type: LocalCommandType.AuthNode, password, _reqId: reqId });
+        return;
+      }
+
+      case BrowserCommandType.ChangePermissionMode: {
+        const conn = this.resolveForSession(ws, msg.sessionId);
+        if (conn) {
+          if (!this.nodes.isAuthenticated(ws, conn.nodeId)) {
+            this.sendAuthRequired(ws, conn.nodeId);
+            return;
+          }
+          this.send(conn.ws, { type: LocalCommandType.ChangePermissionMode, sessionId: msg.sessionId, permissionMode: msg.permissionMode });
+        }
+        break;
+      }
+
+      case BrowserCommandType.RetryWithPermission: {
+        const conn = this.resolveForSession(ws, msg.sessionId);
+        if (conn) {
+          if (!this.nodes.isAuthenticated(ws, conn.nodeId)) {
+            this.sendAuthRequired(ws, conn.nodeId);
+            return;
+          }
+          this.send(conn.ws, { type: LocalCommandType.RetryWithPermission, sessionId: msg.sessionId, permissionMode: msg.permissionMode });
+        }
+        break;
+      }
+
+      case BrowserCommandType.GetGitStatus: {
+        const conn = this.resolveAuthedTarget(ws, msg.nodeId, { noSelectionError: '未选择节点' });
+        if (!conn) return;
+        this.send(conn.ws, { type: LocalCommandType.GetGitStatus, projectPath: msg.projectPath, projectId: msg.projectId, _reqId: this.matcher.registerBrowser(ws, 'get_git_status', BROWSER_REQUEST_TIMEOUT_MS) });
+        break;
+      }
+
+      case BrowserCommandType.GetGitDiff: {
+        const conn = this.resolveAuthedTarget(ws, msg.nodeId, { noSelectionError: '未选择节点' });
+        if (!conn) return;
+        this.send(conn.ws, { type: LocalCommandType.GetGitDiff, projectPath: msg.projectPath, filePath: msg.filePath, staged: msg.staged, _reqId: this.matcher.registerBrowser(ws, 'get_git_diff', BROWSER_REQUEST_TIMEOUT_MS) });
+        break;
+      }
+
+      case BrowserCommandType.GetFileTree: {
+        const conn = this.resolveAuthedTarget(ws, msg.nodeId, { noSelectionError: '未选择节点' });
+        if (!conn) return;
+        this.send(conn.ws, { type: LocalCommandType.GetFileTree, projectPath: msg.projectPath, projectId: msg.projectId, _reqId: this.matcher.registerBrowser(ws, 'get_file_tree', BROWSER_REQUEST_TIMEOUT_MS) });
+        break;
+      }
+
+      case BrowserCommandType.GetFileContent: {
+        const conn = this.resolveAuthedTarget(ws, msg.nodeId, { noSelectionError: '未选择节点' });
+        if (!conn) return;
+        this.send(conn.ws, { type: LocalCommandType.GetFileContent, projectPath: msg.projectPath, filePath: msg.filePath, _reqId: this.matcher.registerBrowser(ws, 'get_file_content', BROWSER_REQUEST_TIMEOUT_MS) });
+        break;
+      }
+    }
+  }
+
+  // ---- HTTP API：向指定/任一节点发请求 ----
+
+  requestLocal(data: Record<string, unknown>, nodeId?: string): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      let targetWs: WebSocket | null = null;
+      if (nodeId) {
+        targetWs = this.nodes.get(nodeId)?.ws ?? null;
+      } else if (this.nodes.size > 0) {
+        targetWs = this.nodes.anyConn()!.ws;
+      }
+
+      if (!targetWs || targetWs.readyState !== WebSocket.OPEN) {
+        reject(new Error(nodeId ? `节点 ${nodeId} 未连接` : '没有在线的本地节点'));
+        return;
+      }
       const reqId = randomUUID();
-      pendingRequests.set(reqId, (resultMsg) => {
-        clearTimeout(timeout);
-        const result = resultMsg as LocalEvent;
-        const success = result.type === LocalEventType.AuthResult ? result.success : false;
-        if (success) {
-          authAttempts.delete(ws);
-          if (!authenticatedBrowsers.has(ws)) {
-            authenticatedBrowsers.set(ws, new Set());
+      this.matcher.register(reqId, resolve);
+      this.send(targetWs, { ...data, _reqId: reqId });
+      setTimeout(() => {
+        if (this.matcher.has(reqId)) {
+          this.matcher.take(reqId);
+          reject(new Error('请求超时'));
+        }
+      }, HTTP_REQUEST_TIMEOUT_MS);
+    });
+  }
+
+  getOnlineNodes(): Array<{ nodeId: string; sessionCount: number; passwordRequired: boolean; workspaceRoot?: string }> {
+    return this.nodes.listNodes();
+  }
+
+  isNodePasswordRequired(nodeId: string): boolean {
+    return this.nodes.isPasswordRequired(nodeId);
+  }
+
+  // ---- 本地服务消息处理 ----
+
+  private handleLocalMessage(ws: WebSocket, msg: LocalEvent): void {
+    // HTTP API / AuthNode 响应匹配
+    const reqId = (msg as unknown as Record<string, unknown>)._reqId as string | undefined;
+    if (reqId) {
+      const httpCb = this.matcher.take(reqId);
+      if (httpCb) {
+        httpCb(msg);
+        return;
+      }
+      // 浏览器请求-响应匹配：去掉 _reqId，附 nodeId 后回给发起 browser
+      const entry = this.matcher.takeBrowser(reqId);
+      if (entry) {
+        const { _reqId: _, ...response } = msg as unknown as Record<string, unknown>;
+        const nodeId = this.states.getNodeId(ws);
+        this.send(entry.ws, { ...response, nodeId });
+        return;
+      }
+    }
+
+    switch (msg.type) {
+      case LocalEventType.Register: {
+        const st = this.states.get(ws);
+        const ip = st?.ip ?? '?';
+        if (!isDevMode() && isUsingDefaultRelayToken()) {
+          console.error(`[relay] 生产模式拒绝默认 token 注册 | IP: ${ip} | nodeId: ${msg.nodeId || 'unknown'}`);
+          // relay→local 拒绝信号（local 端不消费，仅作为 close 前的反馈），不属于 4 向协议 union
+          this.send(ws, { type: 'error', error: '认证失败：生产环境下不允许使用默认 token，请设置 RELAY_TOKEN' });
+          ws.close();
+          return;
+        }
+        if (msg.token !== RELAY_TOKEN) {
+          console.warn(`[relay] 节点注册认证失败: token 不匹配 | IP: ${ip} | 声称 nodeId: ${msg.nodeId || 'unknown'}`);
+          this.send(ws, { type: 'error', error: '认证失败：token 不匹配' });
+          ws.close();
+          return;
+        }
+        const nodeId = msg.nodeId || 'unknown';
+        const replaced = this.nodes.register(nodeId, { ws, nodeId, passwordRequired: msg.passwordRequired === true, workspaceRoot: msg.workspaceRoot });
+        if (replaced) {
+          const oldSt = this.states.get(replaced.ws);
+          const oldIp = oldSt?.ip ?? '?';
+          if (oldIp !== ip) {
+            console.error(`[SECURITY] 节点 ${nodeId} 从不同 IP 重连: ${oldIp} -> ${ip}，可能存在接管风险`);
           }
-          authenticatedBrowsers.get(ws)!.add(authNodeId);
+          const oldStart = oldSt?.connectedAt;
+          const oldDuration = oldStart ? `${((Date.now() - oldStart) / 1000).toFixed(1)}s` : '?';
+          console.log(`[relay] 节点 ${nodeId} 重连，替换旧连接 | IP: ${ip} | 旧连接持续: ${oldDuration}`);
+          replaced.ws.close();
+        }
+        this.states.setNodeId(ws, nodeId);
+        console.log(`[relay] 节点已注册: ${nodeId} | IP: ${ip} | 需密码: ${msg.passwordRequired === true} | 在线节点: ${this.nodes.size}`);
+        this.send(ws, { type: LocalControlType.Registered });
+        this.broadcastNodesList();
+        break;
+      }
+
+      case LocalEventType.Pong:
+        break;
+
+      case LocalEventType.SessionInfo: {
+        if (msg.sessionId) {
+          const nodeId = this.states.getNodeId(ws);
+          if (nodeId) {
+            this.nodes.bindSession(msg.sessionId, nodeId);
+            this.router.broadcastToNodeBrowsers(nodeId, { ...msg, nodeId });
+          }
+        }
+        break;
+      }
+
+      case LocalEventType.ClaudeJson:
+      case LocalEventType.Done:
+      case LocalEventType.Error:
+      case LocalEventType.Aborted:
+      case LocalEventType.SessionEnd: {
+        if (msg.sessionId) {
+          const subType = msg.type === LocalEventType.ClaudeJson && msg.data && typeof msg.data === 'object'
+            ? (msg.data as { type?: string }).type
+            : '';
+          const subCount = this.router.subscribersOf(msg.sessionId);
+          console.log(`[relay] 收到 ${msg.type}${subType ? '/' + subType : ''} sessionId=${(msg.sessionId || '').substring(0, 8)}, 浏览器数=${subCount}`);
+          if (subCount > 0) {
+            this.router.broadcastToSession(msg.sessionId, msg);
+          } else {
+            const nodeId = this.states.getNodeId(ws);
+            console.warn(`[relay] 丢弃无订阅者的会话消息: ${msg.type} sessionId=${msg.sessionId.substring(0, 8)} nodeId=${nodeId}`);
+          }
         } else {
-          if (!authAttempts.has(ws)) authAttempts.set(ws, { failures: 0, lastAttempt: 0 });
-          const att = authAttempts.get(ws)!;
-          att.failures++;
-          att.lastAttempt = Date.now();
+          const nodeId = this.states.getNodeId(ws);
+          console.warn(`[relay] 缺少 sessionId，无法转发: ${msg.type} | 来源节点: ${nodeId}`);
         }
-        const error = result.type === LocalEventType.AuthResult ? result.error : undefined;
-        send(ws, { type: BrowserEventType.AuthResult, nodeId: authNodeId, success, error });
-      });
-      const timeout = setTimeout(() => {
-        if (pendingRequests.has(reqId)) {
-          pendingRequests.delete(reqId);
-          send(ws, { type: BrowserEventType.AuthResult, nodeId: authNodeId, success: false, error: '认证超时' });
-        }
-      }, 5000);
-      send(authNode.ws, { type: LocalCommandType.AuthNode, password, _reqId: reqId });
-      return;
-    }
+        break;
+      }
 
-    case BrowserCommandType.ChangePermissionMode: {
-      const nid = msg.sessionId ? sessionNodeMap.get(msg.sessionId) : null;
-      const targetNode = nid || getNodeIdForBrowser(ws);
-      if (targetNode && msg.sessionId) {
-        const node = localNodes.get(targetNode);
-        if (node) {
-          if (!isAuthenticated(ws, targetNode)) {
-            sendAuthRequired(ws, targetNode);
-            return;
-          }
-          send(node.ws, { type: LocalCommandType.ChangePermissionMode, sessionId: msg.sessionId, permissionMode: msg.permissionMode });
-        }
+      case LocalEventType.SessionsList:
+      case LocalEventType.ProjectsList:
+      case LocalEventType.ProjectInfo:
+      case LocalEventType.GitStatus:
+      case LocalEventType.GitDiff:
+      case LocalEventType.FileTree:
+      case LocalEventType.FileContent: {
+        const nodeId = this.states.getNodeId(ws);
+        if (!nodeId) break;
+        const { _reqId: _, ...broadcastMsg } = msg as unknown as Record<string, unknown>;
+        this.router.broadcastToNodeBrowsers(nodeId, { ...broadcastMsg, nodeId });
+        break;
       }
-      break;
-    }
-
-    case BrowserCommandType.RetryWithPermission: {
-      const nid = msg.sessionId ? sessionNodeMap.get(msg.sessionId) : null;
-      const targetNode = nid || getNodeIdForBrowser(ws);
-      if (targetNode && msg.sessionId) {
-        const node = localNodes.get(targetNode);
-        if (node) {
-          if (!isAuthenticated(ws, targetNode)) {
-            sendAuthRequired(ws, targetNode);
-            return;
-          }
-          send(node.ws, { type: LocalCommandType.RetryWithPermission, sessionId: msg.sessionId, permissionMode: msg.permissionMode });
-        }
-      }
-      break;
-    }
-
-    case BrowserCommandType.GetGitStatus: {
-      const targetNode = msg.nodeId || getNodeIdForBrowser(ws);
-      if (!targetNode) {
-        send(ws, { type: BrowserEventType.Error, error: '未选择节点' });
-        return;
-      }
-      const node = localNodes.get(targetNode);
-      if (!node) return;
-      if (!isAuthenticated(ws, targetNode)) {
-        sendAuthRequired(ws, targetNode);
-        return;
-      }
-      const reqId = registerBrowserRequest(ws, 'get_git_status');
-      send(node.ws, { type: LocalCommandType.GetGitStatus, projectPath: msg.projectPath, projectId: msg.projectId, _reqId: reqId });
-      break;
-    }
-
-    case BrowserCommandType.GetGitDiff: {
-      const targetNode = msg.nodeId || getNodeIdForBrowser(ws);
-      if (!targetNode) {
-        send(ws, { type: BrowserEventType.Error, error: '未选择节点' });
-        return;
-      }
-      const node = localNodes.get(targetNode);
-      if (!node) return;
-      if (!isAuthenticated(ws, targetNode)) {
-        sendAuthRequired(ws, targetNode);
-        return;
-      }
-      const reqId = registerBrowserRequest(ws, 'get_git_diff');
-      send(node.ws, { type: LocalCommandType.GetGitDiff, projectPath: msg.projectPath, filePath: msg.filePath, staged: msg.staged, _reqId: reqId });
-      break;
-    }
-
-    case BrowserCommandType.GetFileTree: {
-      const targetNode = msg.nodeId || getNodeIdForBrowser(ws);
-      if (!targetNode) {
-        send(ws, { type: BrowserEventType.Error, error: '未选择节点' });
-        return;
-      }
-      const node = localNodes.get(targetNode);
-      if (!node) return;
-      if (!isAuthenticated(ws, targetNode)) {
-        sendAuthRequired(ws, targetNode);
-        return;
-      }
-      const reqId = registerBrowserRequest(ws, 'get_file_tree');
-      send(node.ws, { type: LocalCommandType.GetFileTree, projectPath: msg.projectPath, projectId: msg.projectId, _reqId: reqId });
-      break;
-    }
-
-    case BrowserCommandType.GetFileContent: {
-      const targetNode = msg.nodeId || getNodeIdForBrowser(ws);
-      if (!targetNode) {
-        send(ws, { type: BrowserEventType.Error, error: '未选择节点' });
-        return;
-      }
-      const node = localNodes.get(targetNode);
-      if (!node) return;
-      if (!isAuthenticated(ws, targetNode)) {
-        sendAuthRequired(ws, targetNode);
-        return;
-      }
-      const reqId = registerBrowserRequest(ws, 'get_file_content');
-      send(node.ws, { type: LocalCommandType.GetFileContent, projectPath: msg.projectPath, filePath: msg.filePath, _reqId: reqId });
-      break;
     }
   }
-}
 
-// ---- HTTP API：向指定/任一节点发请求 ----
+  // ---- 连接管理 ----
 
-export function requestLocal(data: Record<string, unknown>, nodeId?: string): Promise<unknown> {
-  return new Promise((resolve, reject) => {
-    // 如果指定了 nodeId，用指定的；否则用第一个在线的
-    let targetWs: WebSocket | null = null;
-    if (nodeId) {
-      const node = localNodes.get(nodeId);
-      targetWs = node?.ws ?? null;
-    } else if (localNodes.size > 0) {
-      targetWs = localNodes.values().next().value!.ws;
+  handleBrowserConnection(ws: WebSocket, ip: string): void {
+    this.states.init(ws, ip);
+    this.router.addBrowser(ws);
+    this.nodes.forgetBrowser(ws); // 清掉可能残留的选中/认证态（原 browserNodeMap.delete(ws)）
+    console.log(`[relay] 浏览器已连接 | IP: ${ip} | 在线: ${this.router.size}`);
+
+    // 通知当前节点列表
+    const online = this.nodes.listNodes();
+    if (online.length > 0) {
+      this.send(ws, { type: BrowserEventType.NodesList, nodes: online });
     }
 
-    if (!targetWs || targetWs.readyState !== WebSocket.OPEN) {
-      reject(new Error(nodeId ? `节点 ${nodeId} 未连接` : '没有在线的本地节点'));
-      return;
-    }
-    const reqId = randomUUID();
-    pendingRequests.set(reqId, resolve);
-    send(targetWs, { ...data, _reqId: reqId });
-    setTimeout(() => {
-      if (pendingRequests.has(reqId)) {
-        pendingRequests.delete(reqId);
-        reject(new Error('请求超时'));
+    ws.on('message', (raw) => {
+      try {
+        const msg = JSON.parse(raw.toString());
+        this.handleBrowserMessage(ws, msg as BrowserCommand);
+      } catch {
+        console.warn(`[relay] 浏览器消息解析失败 | IP: ${ip}`);
       }
-    }, 5000);
-  });
-}
+    });
 
-// 列出所有在线节点（供 HTTP API 使用）
-export function getOnlineNodes(): Array<{ nodeId: string; sessionCount: number; passwordRequired: boolean; workspaceRoot?: string }> {
-  const nodes: Array<{ nodeId: string; sessionCount: number; passwordRequired: boolean; workspaceRoot?: string }> = [];
-  for (const [nid, info] of localNodes) {
-    let count = 0;
-    for (const [, nid2] of sessionNodeMap) {
-      if (nid2 === nid) count++;
-    }
-    nodes.push({ nodeId: nid, sessionCount: count, passwordRequired: info.passwordRequired, workspaceRoot: info.workspaceRoot });
-  }
-  return nodes;
-}
+    ws.on('close', (code) => {
+      clearInterval(heartbeat);
+      const st = this.states.get(ws);
+      const duration = st ? `${((Date.now() - st.connectedAt) / 1000).toFixed(1)}s` : '?';
+      this.router.removeBrowser(ws);
+      this.nodes.forgetBrowser(ws);
+      this.authAttempts.delete(ws);
+      this.matcher.forgetBrowser(ws);
+      console.log(`[relay] 浏览器已断开 | IP: ${ip} | 持续: ${duration} | closeCode: ${code} | 在线: ${this.router.size}`);
+    });
 
-export function isNodePasswordRequired(nodeId: string): boolean {
-  const node = localNodes.get(nodeId);
-  return node ? node.passwordRequired : false;
-}
+    ws.on('error', (err) => {
+      console.error(`[relay] 浏览器连接错误 | IP: ${ip} | ${err.message}`);
+    });
 
-// ---- 本地服务消息处理 ----
-
-function handleLocalMessage(ws: WebSocket, msg: LocalEvent): void {
-  // HTTP API 响应
-  const reqId = (msg as unknown as Record<string, unknown>)._reqId as string | undefined;
-  if (reqId && pendingRequests.has(reqId)) {
-    pendingRequests.get(reqId)!(msg);
-    pendingRequests.delete(reqId);
-    return;
-  }
-
-  // 浏览器请求-响应匹配
-  if (reqId && browserRequests.has(reqId)) {
-    const entry = browserRequests.get(reqId)!;
-    clearTimeout(entry.timeout);
-    browserRequests.delete(reqId);
-    const { _reqId: _, ...response } = msg as unknown as Record<string, unknown>;
-    const nodeId = (ws as unknown as Record<string, unknown>)._nodeId as string;
-    send(entry.ws, { ...response, nodeId });
-    return;
-  }
-
-  switch (msg.type) {
-    case LocalEventType.Register: {
-      const ip = (ws as unknown as Record<string, unknown>)._ip as string || '?';
-      if (!isDevMode() && isUsingDefaultRelayToken()) {
-        console.error(`[relay] 生产模式拒绝默认 token 注册 | IP: ${ip} | nodeId: ${msg.nodeId || 'unknown'}`);
-        // relay→local 拒绝信号（local 端不消费，仅作为 close 前的反馈），不属于 4 向协议 union
-        send(ws, { type: 'error', error: '认证失败：生产环境下不允许使用默认 token，请设置 RELAY_TOKEN' });
-        ws.close();
-        return;
-      }
-      if (msg.token !== RELAY_TOKEN) {
-        console.warn(`[relay] 节点注册认证失败: token 不匹配 | IP: ${ip} | 声称 nodeId: ${msg.nodeId || 'unknown'}`);
-        send(ws, { type: 'error', error: '认证失败：token 不匹配' });
-        ws.close();
-        return;
-      }
-      const nodeId = msg.nodeId || 'unknown';
-      // 同 nodeId 重连：替换旧连接
-      if (localNodes.has(nodeId)) {
-        const oldNode = localNodes.get(nodeId)!;
-        const oldIp = (oldNode.ws as unknown as Record<string, unknown>)._ip as string || '?';
-        if (oldIp !== ip) {
-          console.error(`[SECURITY] 节点 ${nodeId} 从不同 IP 重连: ${oldIp} -> ${ip}，可能存在接管风险`);
-        }
-        const oldStart = (oldNode.ws as unknown as Record<string, unknown>)._connectedAt as number;
-        const oldDuration = oldStart ? `${((Date.now() - oldStart) / 1000).toFixed(1)}s` : '?';
-        console.log(`[relay] 节点 ${nodeId} 重连，替换旧连接 | IP: ${ip} | 旧连接持续: ${oldDuration}`);
-        localNodes.get(nodeId)!.ws.close();
-      }
-      localNodes.set(nodeId, { ws, nodeId, passwordRequired: msg.passwordRequired === true, workspaceRoot: msg.workspaceRoot });
-      // 存储 nodeId 到 ws 上供 disconnect 时查找
-      (ws as unknown as Record<string, unknown>)._nodeId = nodeId;
-      console.log(`[relay] 节点已注册: ${nodeId} | IP: ${ip} | 需密码: ${msg.passwordRequired === true} | 在线节点: ${localNodes.size}`);
-      send(ws, { type: LocalControlType.Registered });
-      broadcastNodesList();
-      break;
-    }
-
-    case LocalEventType.Pong:
-      break;
-
-    case LocalEventType.SessionInfo: {
-      if (msg.sessionId) {
-        const nodeId = (ws as unknown as Record<string, unknown>)._nodeId as string;
-        if (nodeId) {
-          sessionNodeMap.set(msg.sessionId, nodeId);
-          broadcastToNodeBrowsers(nodeId, { ...msg, nodeId });
-        }
-      }
-      break;
-    }
-
-    case LocalEventType.ClaudeJson:
-    case LocalEventType.Done:
-    case LocalEventType.Error:
-    case LocalEventType.Aborted:
-    case LocalEventType.SessionEnd: {
-      if (msg.sessionId) {
-        const subType = msg.type === LocalEventType.ClaudeJson && msg.data && typeof msg.data === 'object'
-          ? (msg.data as { type?: string }).type
-          : '';
-        console.log(`[relay] 收到 ${msg.type}${subType ? '/' + subType : ''} sessionId=${(msg.sessionId || '').substring(0, 8)}, 浏览器数=${msg.sessionId ? (browserSessions.get(msg.sessionId)?.size ?? 0) : 'N/A'}`);
-        const clients = browserSessions.get(msg.sessionId);
-        if (clients && clients.size > 0) {
-          broadcastToSession(msg.sessionId, msg);
-        } else {
-          const nodeId = (ws as unknown as Record<string, unknown>)._nodeId as string;
-          console.warn(`[relay] 丢弃无订阅者的会话消息: ${msg.type} sessionId=${msg.sessionId.substring(0, 8)} nodeId=${nodeId}`);
-        }
+    // 心跳保活（协议级 ping，浏览器自动响应 pong）
+    const heartbeat = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.ping();
       } else {
-        const nodeId = (ws as unknown as Record<string, unknown>)._nodeId as string;
-        console.warn(`[relay] 缺少 sessionId，无法转发: ${msg.type} | 来源节点: ${nodeId}`);
+        clearInterval(heartbeat);
       }
-      break;
-    }
+    }, PING_INTERVAL_MS);
+  }
 
-    case LocalEventType.SessionsList:
-    case LocalEventType.ProjectsList:
-    case LocalEventType.ProjectInfo:
-    case LocalEventType.GitStatus:
-    case LocalEventType.GitDiff:
-    case LocalEventType.FileTree:
-    case LocalEventType.FileContent: {
-      const nodeId = (ws as unknown as Record<string, unknown>)._nodeId as string;
-      if (!nodeId) break;
-      const { _reqId: _, ...broadcastMsg } = msg as unknown as Record<string, unknown>;
-      broadcastToNodeBrowsers(nodeId, { ...broadcastMsg, nodeId });
-      break;
-    }
+  handleLocalConnection(ws: WebSocket, ip: string): void {
+    this.states.init(ws, ip);
+    console.log(`[relay] 本地服务连接请求 | IP: ${ip}`);
+
+    ws.on('message', (raw) => {
+      try {
+        const msg = JSON.parse(raw.toString());
+        this.handleLocalMessage(ws, msg as LocalEvent);
+      } catch {
+        console.warn(`[relay] 本地消息解析失败 | IP: ${ip}`);
+      }
+    });
+
+    ws.on('close', (code, reason) => {
+      clearInterval(heartbeat);
+      const st = this.states.get(ws);
+      const duration = st ? `${((Date.now() - st.connectedAt) / 1000).toFixed(1)}s` : '?';
+      const reasonStr = reason ? Buffer.from(reason).toString('utf-8').substring(0, 100) : '(无)';
+      const nodeId = st?.nodeId; // undefined = 尚未 register（原 'pending'）
+      if (nodeId && this.nodes.get(nodeId)?.ws === ws) {
+        this.nodes.unregister(nodeId);
+        console.log(`[relay] 节点已断开: ${nodeId} | IP: ${ip} | 持续: ${duration} | closeCode: ${code} | reason: ${reasonStr} | 在线节点: ${this.nodes.size}`);
+
+        // 清理该节点的会话映射，并广播断连 error
+        for (const sid of this.nodes.forgetSessionsOfNode(nodeId)) {
+          this.router.broadcastToSession(sid, { type: BrowserEventType.Error, error: `节点 ${nodeId} 已断开` });
+        }
+
+        this.broadcastNodesList();
+      }
+    });
+
+    ws.on('error', (err) => {
+      console.error(`[relay] 本地连接错误 | IP: ${ip} | ${err.message}`);
+    });
+
+    // 心跳
+    const heartbeat = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        this.send(ws, { type: LocalControlType.Ping });
+      } else {
+        clearInterval(heartbeat);
+      }
+    }, PING_INTERVAL_MS);
   }
 }
 
-// ---- 连接管理 ----
+// ---- 模块级单例 + 5 个对外委托函数（保持 index.ts 调用面不变）----
+
+const relay = new ConnectionHandler();
 
 export function handleBrowserConnection(ws: WebSocket, ip: string): void {
-  (ws as unknown as Record<string, unknown>)._connectedAt = Date.now();
-  (ws as unknown as Record<string, unknown>)._ip = ip;
-  allBrowsers.add(ws);
-  browserNodeMap.delete(ws);
-  console.log(`[relay] 浏览器已连接 | IP: ${ip} | 在线: ${allBrowsers.size}`);
-
-  // 通知当前节点列表
-  const nodes = getOnlineNodes();
-  if (nodes.length > 0) {
-    send(ws, { type: BrowserEventType.NodesList, nodes });
-  }
-
-  ws.on('message', (raw) => {
-    try {
-      const msg = JSON.parse(raw.toString());
-      handleBrowserMessage(ws, msg as BrowserCommand);
-    } catch {
-      console.warn(`[relay] 浏览器消息解析失败 | IP: ${ip}`);
-    }
-  });
-
-  ws.on('close', (code) => {
-    clearInterval(heartbeat);
-    const start = (ws as unknown as Record<string, unknown>)._connectedAt as number;
-    const duration = start ? `${((Date.now() - start) / 1000).toFixed(1)}s` : '?';
-    allBrowsers.delete(ws);
-    browserNodeMap.delete(ws);
-    authenticatedBrowsers.delete(ws);
-    authAttempts.delete(ws);
-    for (const [, clients] of browserSessions) {
-      clients.delete(ws);
-    }
-    for (const [reqId, entry] of browserRequests) {
-      if (entry.ws === ws) {
-        clearTimeout(entry.timeout);
-        browserRequests.delete(reqId);
-      }
-    }
-    console.log(`[relay] 浏览器已断开 | IP: ${ip} | 持续: ${duration} | closeCode: ${code} | 在线: ${allBrowsers.size}`);
-  });
-
-  ws.on('error', (err) => {
-    console.error(`[relay] 浏览器连接错误 | IP: ${ip} | ${err.message}`);
-  });
-
-  // 心跳保活（协议级 ping，浏览器自动响应 pong）
-  const heartbeat = setInterval(() => {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.ping();
-    } else {
-      clearInterval(heartbeat);
-    }
-  }, 30000);
+  relay.handleBrowserConnection(ws, ip);
 }
 
 export function handleLocalConnection(ws: WebSocket, ip: string): void {
-  (ws as unknown as Record<string, unknown>)._connectedAt = Date.now();
-  (ws as unknown as Record<string, unknown>)._ip = ip;
-  console.log(`[relay] 本地服务连接请求 | IP: ${ip}`);
-
-  // 暂时存储连接，等 register 消息到达后才知道 nodeId
-  // 先设置一个临时 nodeId，register 时会设置正确的
-  (ws as unknown as Record<string, unknown>)._nodeId = 'pending';
-
-  ws.on('message', (raw) => {
-    try {
-      const msg = JSON.parse(raw.toString());
-      handleLocalMessage(ws, msg as LocalEvent);
-    } catch {
-      console.warn(`[relay] 本地消息解析失败 | IP: ${ip}`);
-    }
-  });
-
-  ws.on('close', (code, reason) => {
-    clearInterval(heartbeat);
-    const start = (ws as unknown as Record<string, unknown>)._connectedAt as number;
-    const duration = start ? `${((Date.now() - start) / 1000).toFixed(1)}s` : '?';
-    const reasonStr = reason ? Buffer.from(reason).toString('utf-8').substring(0, 100) : '(无)';
-    const nodeId = (ws as unknown as Record<string, unknown>)._nodeId as string | undefined;
-    if (nodeId && nodeId !== 'pending' && localNodes.get(nodeId)?.ws === ws) {
-      localNodes.delete(nodeId);
-      console.log(`[relay] 节点已断开: ${nodeId} | IP: ${ip} | 持续: ${duration} | closeCode: ${code} | reason: ${reasonStr} | 在线节点: ${localNodes.size}`);
-
-      // 清理该节点的会话映射
-      for (const [sid, nid] of sessionNodeMap) {
-        if (nid === nodeId) {
-          sessionNodeMap.delete(sid);
-          broadcastToSession(sid, { type: BrowserEventType.Error, error: `节点 ${nodeId} 已断开` });
-        }
-      }
-
-      broadcastNodesList();
-    }
-  });
-
-  ws.on('error', (err) => {
-    console.error(`[relay] 本地连接错误 | IP: ${ip} | ${err.message}`);
-  });
-
-  // 心跳
-  const heartbeat = setInterval(() => {
-    if (ws.readyState === WebSocket.OPEN) {
-      send(ws, { type: LocalControlType.Ping });
-    } else {
-      clearInterval(heartbeat);
-    }
-  }, 30000);
+  relay.handleLocalConnection(ws, ip);
 }
 
-// 扩展 ws 以存储内部状态
-declare module 'ws' {
-  interface WebSocket {
-    _sessionId?: string;
-  }
+export function requestLocal(data: Record<string, unknown>, nodeId?: string): Promise<unknown> {
+  return relay.requestLocal(data, nodeId);
 }
+
+export function getOnlineNodes(): Array<{ nodeId: string; sessionCount: number; passwordRequired: boolean; workspaceRoot?: string }> {
+  return relay.getOnlineNodes();
+}
+
+export function isNodePasswordRequired(nodeId: string): boolean {
+  return relay.isNodePasswordRequired(nodeId);
+}
+
