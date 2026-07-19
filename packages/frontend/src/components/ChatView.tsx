@@ -4,11 +4,12 @@ import { BrowserCommandType } from "../types";
 import { useWebSocket } from "../hooks/useWebSocket";
 import { useStreamParser } from "../hooks/streaming/useStreamParser";
 import { useBrowserAuth } from "../hooks/useBrowserAuth";
+import { useNodeAuth } from "../hooks/useNodeAuth";
 import { useUi } from "../hooks/useUi";
 import { useFileBrowser } from "../hooks/useFileBrowser";
 import { UnifiedMessageProcessor } from "../utils/UnifiedMessageProcessor";
 import { dedupConsecutiveAssistant } from "../utils/dedupMessages";
-import { saveLastView, loadLastView, saveNodePassword, loadNodePassword } from "../utils/localStorage";
+import { saveLastView, loadLastView } from "../utils/localStorage";
 import { dispatchBrowserEvent } from "../ws/dispatcher";
 import { ProjectSidebar } from "./ProjectSidebar";
 import { ChatMessages } from "./ChatMessages";
@@ -89,10 +90,14 @@ export function ChatView() {
   } | null>(null);
   const [nodes, setNodes] = useState<NodeInfo[]>([]);
   const [activeNodeId, setActiveNodeId] = useState<string | null>(null);
-  const [authenticatedNodes, setAuthenticatedNodes] = useState<Set<string>>(new Set());
-  const [pendingAuthNodeId, setPendingAuthNodeId] = useState<string | null>(null);
-  const [authError, setAuthError] = useState<string | null>(null);
-  const [autoAuthInProgress, setAutoAuthInProgress] = useState(false);
+  const {
+    authenticatedNodes, setAuthenticatedNodes,
+    pendingAuthNodeId, setPendingAuthNodeId,
+    authError, setAuthError,
+    autoAuthInProgress, setAutoAuthInProgress,
+    autoAuthTimeoutRef,
+    tryAutoAuth, handleAuthNode,
+  } = useNodeAuth({ send, connected });
 
   const {
     gitStatuses, setGitStatuses,
@@ -109,7 +114,6 @@ export function ChatView() {
   const creatingNewSessionRef = useRef(false);
   const handleRawMessageRef = useRef<((raw: string) => void) | null>(null);
   const restoredRef = useRef(false);
-  const autoAuthTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // 初始加载节点列表和项目列表（通过 HTTP，可靠）
   useEffect(() => {
@@ -219,29 +223,6 @@ export function ChatView() {
     }
   }, [activeNodeId, activeProjectId, activeSessionId, sessions, projects]);
 
-  // 当节点需要认证且 WebSocket 已连接时，尝试用本地保存的密码自动认证
-  useEffect(() => {
-    if (pendingAuthNodeId && connected && !autoAuthInProgress && !authenticatedNodes.has(pendingAuthNodeId)) {
-      const savedPassword = loadNodePassword(pendingAuthNodeId);
-      if (savedPassword) {
-        if (autoAuthTimeoutRef.current) clearTimeout(autoAuthTimeoutRef.current);
-        setAutoAuthInProgress(true);
-        setAuthError(null);
-        send({ type: BrowserCommandType.AuthNode, nodeId: pendingAuthNodeId, password: savedPassword });
-        autoAuthTimeoutRef.current = setTimeout(() => {
-          setAutoAuthInProgress(false);
-          autoAuthTimeoutRef.current = null;
-        }, 5000);
-      }
-    }
-    return () => {
-      if (autoAuthTimeoutRef.current) {
-        clearTimeout(autoAuthTimeoutRef.current);
-        autoAuthTimeoutRef.current = null;
-      }
-    };
-  }, [pendingAuthNodeId, connected, autoAuthInProgress, send, authenticatedNodes]);
-
   // 节点认证成功后加载项目和会话（仅当 HTTP 未返回数据时通过 WS 补充加载）
   // 不用 loadedNodesRef 防重 —— 因为 send() 在 WS 未 OPEN 时会静默丢弃，
   // 如果首次被丢弃，后续重连必须能重新请求。用 projects/sessions 是否为空来判断是否需要加载。
@@ -350,26 +331,6 @@ export function ChatView() {
     });
   }, [onRawMessage]);
 
-  const tryAutoAuth = useCallback(
-    (nodeId: string): boolean => {
-      const savedPassword = loadNodePassword(nodeId);
-      if (savedPassword && connected) {
-        if (autoAuthTimeoutRef.current) clearTimeout(autoAuthTimeoutRef.current);
-        setAutoAuthInProgress(true);
-        setPendingAuthNodeId(nodeId);
-        setAuthError(null);
-        send({ type: BrowserCommandType.AuthNode, nodeId, password: savedPassword });
-        autoAuthTimeoutRef.current = setTimeout(() => {
-          setAutoAuthInProgress(false);
-          autoAuthTimeoutRef.current = null;
-        }, 5000);
-        return true;
-      }
-      return false;
-    },
-    [connected, send],
-  );
-
   const handleSelectNode = useCallback(
     (nodeId: string) => {
       setActiveNodeId(nodeId);
@@ -434,15 +395,6 @@ export function ChatView() {
       }
     }
   }, [activeNodeId, nodes, connected, authenticatedNodes, autoAuthInProgress, pendingAuthNodeId, tryAutoAuth]);
-
-  const handleAuthNode = useCallback(
-    (nodeId: string, password: string) => {
-      setAuthError(null);
-      saveNodePassword(nodeId, password);
-      send({ type: BrowserCommandType.AuthNode, nodeId, password });
-    },
-    [send],
-  );
 
   const handleCreateProject = useCallback(
     (name: string, projectPath: string) => {
