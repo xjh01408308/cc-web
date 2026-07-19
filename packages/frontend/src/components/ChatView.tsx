@@ -5,6 +5,7 @@ import { useWebSocket } from "../hooks/useWebSocket";
 import { useClaudeStreaming } from "../hooks/useClaudeStreaming";
 import { UnifiedMessageProcessor } from "../utils/UnifiedMessageProcessor";
 import { dedupConsecutiveAssistant } from "../utils/dedupMessages";
+import { saveLastView, loadLastView, saveNodePassword, loadNodePassword } from "../utils/localStorage";
 import { dispatchBrowserEvent } from "../ws/dispatcher";
 import { ProjectSidebar } from "./ProjectSidebar";
 import { ChatMessages } from "./ChatMessages";
@@ -172,51 +173,6 @@ export function ChatView() {
   const autoAuthTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeSessionIdRef = useRef(activeSessionId);
   activeSessionIdRef.current = activeSessionId;
-
-  // 持久化最后浏览状态（含 projectPath，避免重启后路径依赖 process.cwd()）
-  const LAST_VIEW_KEY = "cc-web-last-view";
-  const saveLastView = (nodeId: string, projectId?: string | null, sessionId?: string | null, projectPath?: string | null, projectName?: string | null) => {
-    try {
-      localStorage.setItem(LAST_VIEW_KEY, JSON.stringify({
-        nodeId,
-        projectId: projectId || undefined,
-        sessionId: sessionId || undefined,
-        projectPath: projectPath || undefined,
-        projectName: projectName || undefined,
-      }));
-    } catch { /* localStorage 不可用 */ }
-  };
-  const loadLastView = (): { nodeId?: string; projectId?: string; sessionId?: string; projectPath?: string; projectName?: string } | null => {
-    try {
-      const raw = localStorage.getItem(LAST_VIEW_KEY);
-      return raw ? JSON.parse(raw) : null;
-    } catch { return null; }
-  };
-
-  const NODE_PASSWORDS_KEY = "cc-web-node-passwords";
-  const loadNodePasswords = (): Record<string, string> => {
-    try {
-      const raw = localStorage.getItem(NODE_PASSWORDS_KEY);
-      return raw ? JSON.parse(raw) : {};
-    } catch { return {}; }
-  };
-  const saveNodePassword = (nodeId: string, password: string) => {
-    try {
-      const passwords = loadNodePasswords();
-      passwords[nodeId] = password;
-      localStorage.setItem(NODE_PASSWORDS_KEY, JSON.stringify(passwords));
-    } catch {}
-  };
-  const removeNodePassword = (nodeId: string) => {
-    try {
-      const passwords = loadNodePasswords();
-      delete passwords[nodeId];
-      localStorage.setItem(NODE_PASSWORDS_KEY, JSON.stringify(passwords));
-    } catch {}
-  };
-  const loadNodePassword = (nodeId: string): string | null => {
-    return loadNodePasswords()[nodeId] || null;
-  };
 
   // 初始加载节点列表和项目列表（通过 HTTP，可靠）
   useEffect(() => {
@@ -417,8 +373,6 @@ export function ChatView() {
             pendingSessionRef,
             creatingNewSessionRef,
             autoAuthTimeoutRef,
-            loadLastView,
-            removeNodePassword,
             setNodes,
             setActiveNodeId,
             setAuthenticatedNodes,

@@ -1,8 +1,15 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { dispatchBrowserEvent } from "./dispatcher";
 import type { DispatchContext } from "./dispatcher";
 import { BrowserEventType } from "../types";
 import type { BrowserEvent } from "../types";
+import { loadLastView, removeNodePassword } from "../utils/localStorage";
+
+// dispatcher 直接 import localStorage utils（非 ctx 注入），故 mock 模块。
+vi.mock("../utils/localStorage", () => ({
+  loadLastView: vi.fn(),
+  removeNodePassword: vi.fn(),
+}));
 
 // ---- mock context 工厂 ----
 
@@ -20,8 +27,6 @@ function createMockContext(overrides: object = {}) {
     pendingSessionRef: { current: null },
     creatingNewSessionRef: { current: false },
     autoAuthTimeoutRef: { current: null },
-    loadLastView: vi.fn(() => null),
-    removeNodePassword: vi.fn(),
     setNodes: vi.fn(),
     setActiveNodeId: vi.fn(),
     setAuthenticatedNodes: vi.fn(),
@@ -54,6 +59,13 @@ function createMockContext(overrides: object = {}) {
 function ev(partial: Record<string, unknown>): BrowserEvent {
   return partial as unknown as BrowserEvent;
 }
+
+// loadLastView / removeNodePassword 是模块级单例 mock，每个测试前重置调用与实现。
+beforeEach(() => {
+  vi.mocked(loadLastView).mockReset();
+  vi.mocked(loadLastView).mockReturnValue(null);
+  vi.mocked(removeNodePassword).mockReset();
+});
 
 describe("dispatchBrowserEvent — nodeId 过滤", () => {
   it("早期类型（NodesList）不经 nodeId 过滤", () => {
@@ -133,9 +145,8 @@ describe("dispatchBrowserEvent — NodesList", () => {
 
 describe("dispatchBrowserEvent — AuthResult", () => {
   it("成功 → 加入 authenticatedNodes、清 pending、从 loadLastView 恢复 pendingSession", () => {
-    const ctx = createMockContext({
-      loadLastView: vi.fn(() => ({ nodeId: "n1", sessionId: "sess-9" })),
-    });
+    vi.mocked(loadLastView).mockReturnValue({ nodeId: "n1", sessionId: "sess-9" });
+    const ctx = createMockContext();
     dispatchBrowserEvent(
       ev({ type: BrowserEventType.AuthResult, nodeId: "n1", success: true }),
       ctx,
@@ -154,14 +165,13 @@ describe("dispatchBrowserEvent — AuthResult", () => {
   it("成功 + pendingSession 已设 → 不覆盖", () => {
     const ctx = createMockContext({
       pendingSessionRef: { current: "existing" },
-      loadLastView: vi.fn(() => ({ nodeId: "n1", sessionId: "sess-9" })),
     });
     dispatchBrowserEvent(
       ev({ type: BrowserEventType.AuthResult, nodeId: "n1", success: true }),
       ctx,
     );
     expect(ctx.pendingSessionRef.current).toBe("existing");
-    expect(ctx.loadLastView).not.toHaveBeenCalled();
+    expect(loadLastView).not.toHaveBeenCalled();
   });
 
   it("失败 → 移除密码、设置错误", () => {
@@ -170,7 +180,7 @@ describe("dispatchBrowserEvent — AuthResult", () => {
       ev({ type: BrowserEventType.AuthResult, nodeId: "n1", success: false, error: "bad pw" }),
       ctx,
     );
-    expect(ctx.removeNodePassword).toHaveBeenCalledWith("n1");
+    expect(removeNodePassword).toHaveBeenCalledWith("n1");
     expect(ctx.setAuthError).toHaveBeenCalledWith("bad pw");
     expect(ctx.setAutoAuthInProgress).toHaveBeenCalledWith(false);
   });

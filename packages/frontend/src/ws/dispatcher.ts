@@ -21,6 +21,7 @@ import { BrowserEventType } from "../types";
 import type { StreamingContext } from "../hooks/streaming/useStreamParser";
 import { UnifiedMessageProcessor } from "../utils/UnifiedMessageProcessor";
 import { dedupConsecutiveAssistant } from "../utils/dedupMessages";
+import { loadLastView, removeNodePassword } from "../utils/localStorage";
 
 // ---- 进度统计 / 浏览态形状（与 ChatView 内联类型对齐；T-B 时提取共享）----
 
@@ -63,14 +64,6 @@ export interface FileViewState {
   language?: string;
 }
 
-export interface LastView {
-  nodeId?: string;
-  projectId?: string;
-  sessionId?: string;
-  projectPath?: string;
-  projectName?: string;
-}
-
 // ---- dispatcher 所需的全部外部依赖（原 handleRawMessage 闭包捕获）----
 
 export interface DispatchContext {
@@ -88,10 +81,6 @@ export interface DispatchContext {
   pendingSessionRef: MutableRefObject<string | null>;
   creatingNewSessionRef: MutableRefObject<boolean>;
   autoAuthTimeoutRef: MutableRefObject<ReturnType<typeof setTimeout> | null>;
-
-  // localStorage 辅助
-  loadLastView: () => LastView | null;
-  removeNodePassword: (nodeId: string) => void;
 
   // 节点 / 认证 setter
   setNodes: Dispatch<SetStateAction<NodeInfo[]>>;
@@ -264,13 +253,13 @@ function handleAuthResult(event: AuthResultEvent, ctx: DispatchContext): void {
     }
     // 确保 pendingSessionRef 已设置（初始加载自动认证时）
     if (!ctx.pendingSessionRef.current) {
-      const saved = ctx.loadLastView();
+      const saved = loadLastView();
       if (saved?.sessionId && saved.nodeId === resultNodeId) {
         ctx.pendingSessionRef.current = saved.sessionId;
       }
     }
   } else {
-    ctx.removeNodePassword(resultNodeId);
+    removeNodePassword(resultNodeId);
     ctx.setAutoAuthInProgress(false);
     if (ctx.autoAuthTimeoutRef.current) {
       clearTimeout(ctx.autoAuthTimeoutRef.current);
