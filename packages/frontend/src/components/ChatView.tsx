@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from "react";
-import type { AllMessage, ChatMessage, SessionInfo, ProjectInfo, NodeInfo, BrowserEvent } from "../types";
+import type { ChatMessage, SessionInfo, ProjectInfo, NodeInfo, BrowserEvent } from "../types";
 import { BrowserCommandType } from "../types";
 import { useWebSocket } from "../hooks/useWebSocket";
 import { useStreamParser } from "../hooks/streaming/useStreamParser";
@@ -7,6 +7,8 @@ import { useBrowserAuth } from "../hooks/useBrowserAuth";
 import { useNodeAuth } from "../hooks/useNodeAuth";
 import { useUi } from "../hooks/useUi";
 import { useFileBrowser } from "../hooks/useFileBrowser";
+import { useSession } from "../hooks/useSession";
+import { useChat } from "../hooks/useChat";
 import { UnifiedMessageProcessor } from "../utils/UnifiedMessageProcessor";
 import { dedupConsecutiveAssistant } from "../utils/dedupMessages";
 import { saveLastView, loadLastView } from "../utils/localStorage";
@@ -60,36 +62,28 @@ export function ChatView() {
 
   const isMobile = useIsMobile();
   const { sidebarOpen, setSidebarOpen, modelPickerOpen, setModelPickerOpen } = useUi();
-  const [projects, setProjects] = useState<ProjectInfo[]>([]);
-  const [sessions, setSessions] = useState<SessionInfo[]>([]);
-  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
-  const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
-  const [messages, setMessages] = useState<AllMessage[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
-  const [model, setModel] = useState("");
-  const [hasReceivedInit, setHasReceivedInit] = useState(false);
-  const [permissionMode, setPermissionMode] = useState<string>("");
-  const [taskProgress, setTaskProgress] = useState<{
-    description: string;
-    totalTokens: number;
-    toolUses: number;
-    durationMs: number;
-    lastToolName: string;
-  } | null>(null);
-  const [permissionDenials, setPermissionDenials] = useState<
-    Array<{ tool_name: string; tool_use_id: string; tool_input: Record<string, unknown> }> | null
-  >(null);
-  const [tokenUsage, setTokenUsage] = useState<{
-    inputTokens: number;
-    outputTokens: number;
-    cacheReadTokens: number;
-    cacheCreationTokens: number;
-    costUSD: number;
-    contextWindow: number;
-    compactionVersion: number;
-  } | null>(null);
-  const [nodes, setNodes] = useState<NodeInfo[]>([]);
-  const [activeNodeId, setActiveNodeId] = useState<string | null>(null);
+  const {
+    nodes, setNodes,
+    activeNodeId, setActiveNodeId,
+    projects, setProjects,
+    sessions, setSessions,
+    activeSessionId, setActiveSessionId,
+    activeProjectId, setActiveProjectId,
+    pendingSessionRef, creatingNewSessionRef, restoredRef,
+    handleSelectProject, handleCreateProject, handleDeleteProject, handleStopSession,
+  } = useSession({ send });
+  const {
+    messages, setMessages,
+    isLoading, setIsLoading,
+    model, setModel,
+    hasReceivedInit, setHasReceivedInit,
+    permissionMode, setPermissionMode,
+    taskProgress, setTaskProgress,
+    permissionDenials, setPermissionDenials,
+    tokenUsage, setTokenUsage,
+    currentAssistantMessageRef,
+    resetForSessionChange,
+  } = useChat();
   const {
     authenticatedNodes, setAuthenticatedNodes,
     pendingAuthNodeId, setPendingAuthNodeId,
@@ -109,11 +103,7 @@ export function ChatView() {
     handleRequestGitStatus, handleFileClick, handleRequestFileTree, handleFileTreeNodeClick,
   } = useFileBrowser({ send, activeNodeId });
 
-  const currentAssistantMessageRef = useRef<ChatMessage | null>(null);
-  const pendingSessionRef = useRef<string | null>(null);
-  const creatingNewSessionRef = useRef(false);
   const handleRawMessageRef = useRef<((raw: string) => void) | null>(null);
-  const restoredRef = useRef(false);
 
   // 初始加载节点列表和项目列表（通过 HTTP，可靠）
   useEffect(() => {
@@ -336,15 +326,9 @@ export function ChatView() {
       setActiveNodeId(nodeId);
       setActiveSessionId(null);
       setActiveProjectId(null);
-      setMessages([]);
+      resetForSessionChange();
       setProjects([]);
       setSessions([]);
-      setHasReceivedInit(false);
-      setTokenUsage(null);
-      setModel("");
-      setPermissionMode("");
-      setPermissionDenials(null);
-      setTaskProgress(null);
       setAuthError(null);
       setAutoAuthInProgress(false);
 
@@ -396,20 +380,6 @@ export function ChatView() {
     }
   }, [activeNodeId, nodes, connected, authenticatedNodes, autoAuthInProgress, pendingAuthNodeId, tryAutoAuth]);
 
-  const handleCreateProject = useCallback(
-    (name: string, projectPath: string) => {
-      send({ type: BrowserCommandType.CreateProject, name, path: projectPath, nodeId: activeNodeId || undefined });
-    },
-    [send, activeNodeId],
-  );
-
-  const handleDeleteProject = useCallback(
-    (projectId: string) => {
-      send({ type: BrowserCommandType.DeleteProject, projectId, nodeId: activeNodeId || undefined });
-    },
-    [send, activeNodeId],
-  );
-
   const handleDeleteSession = useCallback(
     (sessionId: string) => {
       send({ type: BrowserCommandType.DeleteSession, sessionId, nodeId: activeNodeId || undefined });
@@ -436,22 +406,7 @@ export function ChatView() {
       setActiveSessionId(sessionId);
       setActiveProjectId(projectId);
       pendingSessionRef.current = sessionId;
-      setMessages([]);
-      setHasReceivedInit(false);
-      setTokenUsage(null);
-      setModel("");
-      setPermissionMode("");
-      setPermissionDenials(null);
-      setTaskProgress(null);
-      send({ type: BrowserCommandType.ListSessions, projectId, nodeId: activeNodeId || undefined });
-    },
-    [send, activeNodeId],
-  );
-
-  const handleSelectProject = useCallback(
-    (projectId: string) => {
-      setActiveProjectId(projectId);
-      send({ type: BrowserCommandType.ListProjects, nodeId: activeNodeId || undefined });
+      resetForSessionChange();
       send({ type: BrowserCommandType.ListSessions, projectId, nodeId: activeNodeId || undefined });
     },
     [send, activeNodeId],
@@ -637,18 +592,6 @@ export function ChatView() {
     setIsLoading(false);
     currentAssistantMessageRef.current = null;
   }, [activeSessionId, send, activeNodeId]);
-
-  const handleStopSession = useCallback(
-    (sessionId: string) => {
-      send({ type: BrowserCommandType.StopSession, sessionId, nodeId: activeNodeId || undefined });
-      setSessions((prev) =>
-        prev.map((s) =>
-          s.sessionId === sessionId ? { ...s, status: "idle" as const } : s,
-        ),
-      );
-    },
-    [send, activeNodeId],
-  );
 
   // 未登录时显示登录表单
   if (!authed) {
