@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import type { AllMessage, ChatMessage, SessionInfo, ProjectInfo, NodeInfo, GitStatusResult, GitDiffResult, FileTreeNode, FileTreeResult, FileContentResult, BrowserEvent } from "../types";
 import { BrowserCommandType } from "../types";
 import { useWebSocket } from "../hooks/useWebSocket";
-import { useClaudeStreaming } from "../hooks/useClaudeStreaming";
+import { useStreamParser } from "../hooks/streaming/useStreamParser";
 import { UnifiedMessageProcessor } from "../utils/UnifiedMessageProcessor";
 import { dedupConsecutiveAssistant } from "../utils/dedupMessages";
 import { saveLastView, loadLastView, saveNodePassword, loadNodePassword } from "../utils/localStorage";
@@ -47,7 +47,7 @@ export function ChatView() {
   const [loginLoading, setLoginLoading] = useState(false);
 
   const { connected, send, onRawMessage } = useWebSocket(authed);
-  const { processStreamLine } = useClaudeStreaming();
+  const { processStreamLine } = useStreamParser();
 
   // 清除登录态：session 失效或主动登出时调用，重置加载守卫以便重新登录后能正常加载数据
   const clearSession = useCallback(() => {
