@@ -171,8 +171,6 @@ export function ChatView() {
   const handleRawMessageRef = useRef<((raw: string) => void) | null>(null);
   const restoredRef = useRef(false);
   const autoAuthTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const activeSessionIdRef = useRef(activeSessionId);
-  activeSessionIdRef.current = activeSessionId;
 
   // 初始加载节点列表和项目列表（通过 HTTP，可靠）
   useEffect(() => {
@@ -369,7 +367,6 @@ export function ChatView() {
             processStreamLine,
             hasReceivedInit,
             currentAssistantMessageRef,
-            activeSessionIdRef,
             pendingSessionRef,
             creatingNewSessionRef,
             autoAuthTimeoutRef,

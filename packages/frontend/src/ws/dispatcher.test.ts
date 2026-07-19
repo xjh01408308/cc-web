@@ -23,7 +23,6 @@ function createMockContext(overrides: object = {}) {
     processStreamLine: vi.fn(),
     hasReceivedInit: false,
     currentAssistantMessageRef: { current: null },
-    activeSessionIdRef: { current: null },
     pendingSessionRef: { current: null },
     creatingNewSessionRef: { current: false },
     autoAuthTimeoutRef: { current: null },
@@ -334,7 +333,6 @@ describe("dispatchBrowserEvent — SessionsList", () => {
   it("pending 匹配 + 无 active → 恢复会话状态", () => {
     const ctx = createMockContext({
       pendingSessionRef: { current: "s1" },
-      activeSessionIdRef: { current: null },
     });
     dispatchBrowserEvent(
       ev({
@@ -349,10 +347,26 @@ describe("dispatchBrowserEvent — SessionsList", () => {
     expect(ctx.setPermissionMode).toHaveBeenCalledWith("acceptEdits");
   });
 
+  it("pending 匹配 + 有 active → 不恢复 active", () => {
+    const ctx = createMockContext({
+      pendingSessionRef: { current: "s1" },
+      activeSessionId: "existing",
+    });
+    dispatchBrowserEvent(
+      ev({
+        type: BrowserEventType.SessionsList,
+        sessions: [{ sessionId: "s1", projectId: "p1" }],
+      }),
+      ctx,
+    );
+    expect(ctx.setActiveSessionId).not.toHaveBeenCalled();
+    expect(ctx.setActiveProjectId).not.toHaveBeenCalled();
+  });
+
   it("pending 匹配 + 有 messages → 加载历史 + setHasReceivedInit(true)", () => {
     const ctx = createMockContext({
       pendingSessionRef: { current: "s1" },
-      activeSessionIdRef: { current: "s1" },
+      activeSessionId: "s1",
     });
     dispatchBrowserEvent(
       ev({
@@ -378,7 +392,7 @@ describe("dispatchBrowserEvent — SessionsList", () => {
   it("pending 匹配 + messages 全非 claude_json → 不调 setMessages", () => {
     const ctx = createMockContext({
       pendingSessionRef: { current: "s1" },
-      activeSessionIdRef: { current: "s1" },
+      activeSessionId: "s1",
     });
     dispatchBrowserEvent(
       ev({
@@ -511,7 +525,6 @@ describe("dispatchBrowserEvent — SessionEnd", () => {
 describe("dispatchBrowserEvent — streaming（ClaudeJson / Error / Done / Aborted）", () => {
   it("无 activeSessionId + 带 sessionId → 自动恢复", () => {
     const ctx = createMockContext({
-      activeSessionIdRef: { current: null },
       processStreamLine: vi.fn(),
     });
     dispatchBrowserEvent(
@@ -519,6 +532,18 @@ describe("dispatchBrowserEvent — streaming（ClaudeJson / Error / Done / Abort
       ctx,
     );
     expect(ctx.setActiveSessionId).toHaveBeenCalledWith("streaming-sid");
+  });
+
+  it("有 activeSessionId + 带 sessionId → 不调 setActiveSessionId", () => {
+    const ctx = createMockContext({
+      activeSessionId: "existing",
+      processStreamLine: vi.fn(),
+    });
+    dispatchBrowserEvent(
+      ev({ type: BrowserEventType.ClaudeJson, sessionId: "streaming-sid", data: { type: "user" } }),
+      ctx,
+    );
+    expect(ctx.setActiveSessionId).not.toHaveBeenCalled();
   });
 
   it("调用 processStreamLine，传入 JSON.stringify(event)", () => {
