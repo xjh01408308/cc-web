@@ -77,7 +77,6 @@ export interface DispatchContext {
 
   // 跨消息可变 ref
   currentAssistantMessageRef: MutableRefObject<ChatMessage | null>;
-  activeSessionIdRef: MutableRefObject<string | null>;
   pendingSessionRef: MutableRefObject<string | null>;
   creatingNewSessionRef: MutableRefObject<boolean>;
   autoAuthTimeoutRef: MutableRefObject<ReturnType<typeof setTimeout> | null>;
@@ -346,7 +345,7 @@ function handleSessionsList(event: SessionsListEvent, ctx: DispatchContext): voi
   const target = event.sessions.find((s) => s.sessionId === pendingId);
   if (!target) return;
   // 恢复活跃会话状态（HTTP 认证失败时通过 WebSocket 恢复）
-  if (!ctx.activeSessionIdRef.current) {
+  if (!ctx.activeSessionId) {
     ctx.setActiveSessionId(target.sessionId);
     ctx.setActiveProjectId(target.projectId);
     if (target.model) ctx.setModel(target.model);
@@ -446,7 +445,7 @@ function handleSessionEnd(ctx: DispatchContext): void {
 function handleStreaming(event: StreamingEvent, ctx: DispatchContext): void {
   // 刷新后正在运行的会话继续发送流式消息，自动恢复 activeSessionId
   const streamSid = event.sessionId;
-  if (streamSid && !ctx.activeSessionIdRef.current) {
+  if (streamSid && !ctx.activeSessionId) {
     ctx.setActiveSessionId(streamSid);
   }
 
