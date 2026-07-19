@@ -1,10 +1,11 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import type { AllMessage, ChatMessage, SessionInfo, ProjectInfo, NodeInfo, GitStatusResult, GitDiffResult, FileTreeNode, FileTreeResult, FileContentResult, BrowserEvent } from "../types";
-import { BrowserCommandType, BrowserEventType } from "../types";
+import { BrowserCommandType } from "../types";
 import { useWebSocket } from "../hooks/useWebSocket";
 import { useClaudeStreaming } from "../hooks/useClaudeStreaming";
-import type { StreamingContext } from "../hooks/streaming/useStreamParser";
 import { UnifiedMessageProcessor } from "../utils/UnifiedMessageProcessor";
+import { dedupConsecutiveAssistant } from "../utils/dedupMessages";
+import { dispatchBrowserEvent } from "../ws/dispatcher";
 import { ProjectSidebar } from "./ProjectSidebar";
 import { ChatMessages } from "./ChatMessages";
 import { ChatInput } from "./ChatInput";
@@ -13,21 +14,6 @@ import { ModelPicker } from "./ModelPicker";
 import { PermissionDialog } from "./PermissionDialog";
 import { GitDiffModal } from "./GitDiffModal";
 import { FileViewerModal } from "./FileViewerModal";
-
-// 去重：result 消息的文本与它前面的 assistant 消息相同，批量加载时会产生重复
-function dedupConsecutiveAssistant(messages: AllMessage[]): AllMessage[] {
-  const result: AllMessage[] = [];
-  for (const msg of messages) {
-    if (msg.type === 'chat' && msg.role === 'assistant') {
-      const prev = result[result.length - 1];
-      if (prev && prev.type === 'chat' && prev.role === 'assistant' && prev.content === msg.content) {
-        continue;
-      }
-    }
-    result.push(msg);
-  }
-  return result;
-}
 
 const KNOWN_MODELS = [
   { id: "claude-opus-4-5", name: "Claude Opus 4.5" },
@@ -420,329 +406,44 @@ export function ChatView() {
 
       for (const line of lines) {
         try {
-          const data = JSON.parse(line) as BrowserEvent;
-
-          // 节点列表更新
-          if (data.type === BrowserEventType.NodesList && data.nodes) {
-            const nodeList = data.nodes;
-            setNodes(nodeList);
-            // 只有一个节点时自动选中；当前选中节点不在线时清空
-            if (nodeList.length === 1) {
-              setActiveNodeId((prev) => prev || nodeList[0].nodeId);
-            } else if (nodeList.length === 0) {
-              setActiveNodeId(null);
-            }
-            continue;
-          }
-
-          // 认证结果
-          if (data.type === BrowserEventType.AuthResult) {
-            const resultNodeId = data.nodeId;
-            if (data.success) {
-              setAuthenticatedNodes((prev) => {
-                const next = new Set(prev);
-                next.add(resultNodeId);
-                return next;
-              });
-              setPendingAuthNodeId(null);
-              setAuthError(null);
-              setAutoAuthInProgress(false);
-              if (autoAuthTimeoutRef.current) {
-                clearTimeout(autoAuthTimeoutRef.current);
-                autoAuthTimeoutRef.current = null;
-              }
-              // 确保 pendingSessionRef 已设置（初始加载自动认证时）
-              if (!pendingSessionRef.current) {
-                const saved = loadLastView();
-                if (saved?.sessionId && saved.nodeId === resultNodeId) {
-                  pendingSessionRef.current = saved.sessionId;
-                }
-              }
-            } else {
-              removeNodePassword(resultNodeId);
-              setAutoAuthInProgress(false);
-              if (autoAuthTimeoutRef.current) {
-                clearTimeout(autoAuthTimeoutRef.current);
-                autoAuthTimeoutRef.current = null;
-              }
-              setAuthError((data.error as string) || "认证失败");
-            }
-            continue;
-          }
-
-          // 节点密码认证拦截（WS 路径）：触发自动认证或弹出密码框
-          if (data.type === BrowserEventType.AuthRequired && data.nodeId) {
-            setPendingAuthNodeId(data.nodeId);
-            setIsLoading(false);
-            setTaskProgress(null);
-            continue;
-          }
-
-          // 按 nodeId 过滤：消息附带 nodeId 且与当前选中节点不匹配时跳过
-          if ('nodeId' in data && data.nodeId && activeNodeId && data.nodeId !== activeNodeId) {
-            continue;
-          }
-
-          if (data.type === BrowserEventType.ProjectsList && data.projects) {
-            setProjects(data.projects);
-            continue;
-          }
-
-          if (data.type === BrowserEventType.ProjectInfo && data.project) {
-            const project = data.project;
-            setProjects((prev) => {
-              const idx = prev.findIndex((p) => p.projectId === project.projectId);
-              if (idx >= 0) {
-                const updated = [...prev];
-                updated[idx] = project;
-                return updated;
-              }
-              return [...prev, project];
-            });
-            continue;
-          }
-
-          if (data.type === BrowserEventType.SessionInfo) {
-            const info: SessionInfo = {
-              sessionId: data.sessionId || "",
-              projectId: data.projectId || "",
-              projectPath: data.projectPath || "",
-              model: data.model || undefined,
-              permissionMode: data.permissionMode || undefined,
-              summary: data.summary || "",
-              status: data.status || "running",
-              messageCount: data.messageCount || 0,
-              createdAt: data.createdAt || Date.now(),
-            };
-            setSessions((prev) => {
-              const idx = prev.findIndex((s) => s.sessionId === info.sessionId);
-              if (idx >= 0) {
-                const updated = [...prev];
-                updated[idx] = info;
-                return updated;
-              }
-              return [...prev, info];
-            });
-            if (creatingNewSessionRef.current) {
-              // 新建会话成功，默认选中该会话
-              creatingNewSessionRef.current = false;
-              setActiveSessionId(info.sessionId);
-              setActiveProjectId(info.projectId);
-              pendingSessionRef.current = info.sessionId;
-              setMessages([]);
-              setHasReceivedInit(false);
-              setTokenUsage(null);
-              setModel("");
-              setPermissionDenials(null);
-              setTaskProgress(null);
-            } else if (!activeSessionId && !pendingSessionRef.current) {
-              setActiveSessionId(info.sessionId);
-              setActiveProjectId(info.projectId);
-              pendingSessionRef.current = info.sessionId;
-            }
-            if (data.model) setModel(data.model);
-            if (data.permissionMode) setPermissionMode(data.permissionMode);
-            continue;
-          }
-
-          if (data.type === BrowserEventType.SessionsList && data.sessions) {
-            setSessions(data.sessions);
-            // 如果有待加载的会话，将其历史消息加载到聊天视图
-            const pendingId = pendingSessionRef.current;
-            if (pendingId) {
-              const targetSession = data.sessions.find(
-                (s) => s.sessionId === pendingId,
-              );
-              if (targetSession) {
-                // 恢复活跃会话状态（HTTP 认证失败时通过 WebSocket 恢复）
-                if (!activeSessionIdRef.current) {
-                  setActiveSessionId(targetSession.sessionId);
-                  setActiveProjectId(targetSession.projectId);
-                  if (targetSession.model) setModel(targetSession.model);
-                  if (targetSession.permissionMode) setPermissionMode(targetSession.permissionMode);
-                }
-                if (targetSession.messages && targetSession.messages.length > 0) {
-                const msgs = targetSession.messages as unknown as Record<string, unknown>[];
-                const historyProcessor = new UnifiedMessageProcessor();
-                const created = targetSession.createdAt || Date.now();
-                // 提取 claude_json 类型的消息，取 .data 作为 SDKMessage，附上 timestamp
-                const timestamped = msgs
-                  .filter((m) => m.type === "claude_json" && m.data)
-                  .map((m, i) => ({
-                    ...(m.data as Record<string, unknown>),
-                    timestamp: new Date(created + i).toISOString(),
-                  }));
-                if (timestamped.length > 0) {
-                  const processed = historyProcessor.processMessagesBatch(
-                    timestamped as Parameters<typeof historyProcessor.processMessagesBatch>[0],
-                  );
-                  setMessages(dedupConsecutiveAssistant(processed));
-                }
-                setHasReceivedInit(true);
-              }
-              }
-            }
-            continue;
-          }
-
-          if (data.type === BrowserEventType.GitStatus && data.gitStatus) {
-            const status = data.gitStatus;
-            setGitStatuses((prev) => {
-              const next = new Map(prev);
-              next.set(status.projectId, status);
-              return next;
-            });
-            continue;
-          }
-
-          if (data.type === BrowserEventType.GitDiff && data.diffResult) {
-            const dr = data.diffResult;
-            if (!dr.error) {
-              setDiffState({
-                filePath: dr.filePath,
-                projectPath: dr.projectPath,
-                staged: data.staged ?? false,
-                diff: dr.diff,
-              });
-            }
-            continue;
-          }
-
-          if (data.type === BrowserEventType.FileTree && data.fileTreeResult) {
-            const result = data.fileTreeResult;
-            setFileTreeLoading((prev) => {
-              const next = new Set(prev);
-              next.delete(result.projectId);
-              return next;
-            });
-            if (result.error) {
-              setFileTreeErrors((prev) => {
-                const next = new Map(prev);
-                next.set(result.projectId, result.error!);
-                return next;
-              });
-            } else {
-              setFileTrees((prev) => {
-                const next = new Map(prev);
-                next.set(result.projectId, result.tree);
-                return next;
-              });
-              setFileTreeErrors((prev) => {
-                const next = new Map(prev);
-                next.delete(result.projectId);
-                return next;
-              });
-            }
-            continue;
-          }
-
-          if (data.type === BrowserEventType.FileContent && data.fileContentResult) {
-            const r = data.fileContentResult;
-            if (!r.error) {
-              setFileViewState({
-                filePath: r.filePath,
-                projectPath: r.projectPath,
-                content: r.content,
-                mimeType: r.mimeType,
-                language: r.language,
-              });
-            }
-            continue;
-          }
-
-          if (data.type === BrowserEventType.SessionEnd) {
-            setIsLoading(false);
-            currentAssistantMessageRef.current = null;
-            continue;
-          }
-
-          if (
-            data.type === BrowserEventType.ClaudeJson ||
-            data.type === BrowserEventType.Error ||
-            data.type === BrowserEventType.Done ||
-            data.type === BrowserEventType.Aborted
-          ) {
-            // 刷新后正在运行的会话继续发送流式消息，自动恢复 activeSessionId
-            const streamSid = data.sessionId;
-            if (streamSid && !activeSessionIdRef.current) {
-              setActiveSessionId(streamSid);
-            }
-
-            const streamingContext: StreamingContext = {
-              currentAssistantMessage: currentAssistantMessageRef.current,
-              setCurrentAssistantMessage: (msg) => {
-                currentAssistantMessageRef.current = msg;
-              },
-              addMessage: (msg) => {
-                setMessages((prev) => [...prev, msg]);
-              },
-              updateLastMessage: (content) => {
-                setMessages((prev) => {
-                  const updated = [...prev];
-                  const last = updated[updated.length - 1];
-                  if (
-                    last &&
-                    last.type === "chat" &&
-                    last.role === "assistant"
-                  ) {
-                    updated[updated.length - 1] = { ...last, content };
-                  }
-                  return updated;
-                });
-              },
-              onSessionId: (_sid) => {},
-              hasReceivedInit,
-              setHasReceivedInit,
-              shouldShowInitMessage: () => !hasReceivedInit,
-              onModel: (m) => setModel(m),
-              onTaskProgress: (p) => setTaskProgress(p),
-              onPermissionDenied: (denials) => {
-                setPermissionDenials(denials);
-              },
-              onTokenUsage: (u) =>
-                setTokenUsage((prev) => ({
-                  ...u,
-                  compactionVersion: prev?.compactionVersion ?? 0,
-                })),
-            };
-
-            processStreamLine(JSON.stringify(data), streamingContext);
-
-            if (data.type === BrowserEventType.ClaudeJson && data.data) {
-              const sdkMsg = data.data as Record<string, unknown>;
-              if (sdkMsg.type === "system" && sdkMsg.subtype === "init" && sdkMsg.model) {
-                setModel(String(sdkMsg.model));
-              }
-              // compact_boundary 给出 compact 前的真实上下文 token 数，用于校准进度条
-              if (sdkMsg.type === "system" && sdkMsg.subtype === "compact_boundary") {
-                const meta = sdkMsg.compact_metadata as Record<string, unknown> | undefined;
-                if (meta?.pre_tokens) {
-                  const preTokens = Number(meta.pre_tokens);
-                  setTokenUsage((prev) =>
-                    prev
-                      ? {
-                          ...prev,
-                          inputTokens: preTokens,
-                          cacheReadTokens: 0,
-                          cacheCreationTokens: 0,
-                          compactionVersion: (prev.compactionVersion ?? 0) + 1,
-                        }
-                      : null,
-                  );
-                }
-              }
-            }
-
-            if (
-              data.type === BrowserEventType.Done ||
-              data.type === BrowserEventType.Error ||
-              data.type === BrowserEventType.Aborted
-            ) {
-              setIsLoading(false);
-              setTaskProgress(null);
-              currentAssistantMessageRef.current = null;
-            }
-          }
+          const event = JSON.parse(line) as BrowserEvent;
+          dispatchBrowserEvent(event, {
+            activeNodeId,
+            activeSessionId,
+            processStreamLine,
+            hasReceivedInit,
+            currentAssistantMessageRef,
+            activeSessionIdRef,
+            pendingSessionRef,
+            creatingNewSessionRef,
+            autoAuthTimeoutRef,
+            loadLastView,
+            removeNodePassword,
+            setNodes,
+            setActiveNodeId,
+            setAuthenticatedNodes,
+            setPendingAuthNodeId,
+            setAuthError,
+            setAutoAuthInProgress,
+            setProjects,
+            setSessions,
+            setActiveSessionId,
+            setActiveProjectId,
+            setMessages,
+            setModel,
+            setPermissionMode,
+            setHasReceivedInit,
+            setIsLoading,
+            setTaskProgress,
+            setPermissionDenials,
+            setTokenUsage,
+            setGitStatuses,
+            setDiffState,
+            setFileTrees,
+            setFileTreeErrors,
+            setFileTreeLoading,
+            setFileViewState,
+          });
         } catch (err) {
           console.error("[ChatView] handleRawMessage 解析失败:", err, line.substring(0, 200));
         }
