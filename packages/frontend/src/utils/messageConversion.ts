@@ -1,5 +1,4 @@
 import type {
-  AllMessage,
   SystemMessage,
   ToolMessage,
   ToolResultMessage,
@@ -7,11 +6,9 @@ import type {
   TodoMessage,
   TodoItem,
   SDKMessage,
-  TimestampedSDKMessage,
 } from "../types";
 import { MESSAGE_CONSTANTS } from "./constants";
 import { formatToolArguments } from "./toolUtils";
-import { UnifiedMessageProcessor } from "./UnifiedMessageProcessor";
 
 // Generate a summary from tool result content
 function generateSummary(content: string): string {
@@ -208,41 +205,4 @@ export function createTodoMessage(
     console.debug("Failed to parse todo content:", error);
   }
   return null;
-}
-
-/**
- * Convert a TimestampedSDKMessage to AllMessage array
- * This is the core conversion logic used by both streaming and history loading
- * Now uses UnifiedMessageProcessor for consistent behavior across pipelines
- */
-export function convertTimestampedSDKMessage(
-  message: TimestampedSDKMessage,
-): AllMessage[] {
-  const processor = new UnifiedMessageProcessor();
-
-  // Use the unified processor to convert the message
-  return processor.processMessage(
-    message,
-    {
-      addMessage: () => {}, // Not used in batch mode
-    },
-    {
-      isStreaming: false,
-      timestamp: new Date(message.timestamp).getTime(),
-    },
-  );
-}
-
-/**
- * Convert an array of TimestampedSDKMessages to AllMessage array
- * Used for batch conversion of conversation history
- * Now uses UnifiedMessageProcessor's batch processing for optimal performance and consistency
- */
-export function convertConversationHistory(
-  timestampedMessages: TimestampedSDKMessage[],
-): AllMessage[] {
-  const processor = new UnifiedMessageProcessor();
-
-  // Use the unified processor's batch processing method
-  return processor.processMessagesBatch(timestampedMessages);
 }

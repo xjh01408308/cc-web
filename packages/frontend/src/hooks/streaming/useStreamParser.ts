@@ -4,6 +4,8 @@ import type {
   SDKMessage,
   SystemMessage,
   AbortMessage,
+  AllMessage,
+  ChatMessage,
 } from "../../types";
 import {
   isSystemMessage,
@@ -11,11 +13,49 @@ import {
   isResultMessage,
   isUserMessage,
 } from "../../utils/messageTypes";
-import type { StreamingContext } from "./useMessageProcessor";
 import {
   UnifiedMessageProcessor,
   type ProcessingContext,
 } from "../../utils/UnifiedMessageProcessor";
+
+export interface StreamingContext {
+  currentAssistantMessage: ChatMessage | null;
+  setCurrentAssistantMessage: (msg: ChatMessage | null) => void;
+  addMessage: (msg: AllMessage) => void;
+  updateLastMessage: (content: string) => void;
+  onSessionId?: (sessionId: string) => void;
+  shouldShowInitMessage?: () => boolean;
+  onInitMessageShown?: () => void;
+  hasReceivedInit?: boolean;
+  setHasReceivedInit?: (received: boolean) => void;
+  onPermissionError?: (
+    toolName: string,
+    patterns: string[],
+    toolUseId: string,
+  ) => void;
+  onAbortRequest?: () => void;
+  onTokenUsage?: (usage: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
+    costUSD: number;
+    contextWindow: number;
+  }) => void;
+  onPermissionDenied?: (denials: Array<{
+    tool_name: string;
+    tool_use_id: string;
+    tool_input: Record<string, unknown>;
+  }>) => void;
+  onTaskProgress?: (progress: {
+    description: string;
+    totalTokens: number;
+    toolUses: number;
+    durationMs: number;
+    lastToolName: string;
+  }) => void;
+  onModel?: (model: string) => void;
+}
 
 export function useStreamParser() {
   // Create a single unified processor instance

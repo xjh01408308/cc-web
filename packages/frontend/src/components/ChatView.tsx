@@ -3,7 +3,7 @@ import type { AllMessage, ChatMessage, SessionInfo, ProjectInfo, NodeInfo, GitSt
 import { BrowserCommandType, BrowserEventType } from "../types";
 import { useWebSocket } from "../hooks/useWebSocket";
 import { useClaudeStreaming } from "../hooks/useClaudeStreaming";
-import type { StreamingContext } from "../hooks/streaming/useMessageProcessor";
+import type { StreamingContext } from "../hooks/streaming/useStreamParser";
 import { UnifiedMessageProcessor } from "../utils/UnifiedMessageProcessor";
 import { ProjectSidebar } from "./ProjectSidebar";
 import { ChatMessages } from "./ChatMessages";
