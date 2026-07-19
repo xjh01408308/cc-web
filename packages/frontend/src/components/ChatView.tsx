@@ -1,8 +1,11 @@
 import { useState, useCallback, useEffect, useRef } from "react";
-import type { AllMessage, ChatMessage, SessionInfo, ProjectInfo, NodeInfo, GitStatusResult, GitDiffResult, FileTreeNode, FileTreeResult, FileContentResult, BrowserEvent } from "../types";
+import type { AllMessage, ChatMessage, SessionInfo, ProjectInfo, NodeInfo, BrowserEvent } from "../types";
 import { BrowserCommandType } from "../types";
 import { useWebSocket } from "../hooks/useWebSocket";
 import { useStreamParser } from "../hooks/streaming/useStreamParser";
+import { useBrowserAuth } from "../hooks/useBrowserAuth";
+import { useUi } from "../hooks/useUi";
+import { useFileBrowser } from "../hooks/useFileBrowser";
 import { UnifiedMessageProcessor } from "../utils/UnifiedMessageProcessor";
 import { dedupConsecutiveAssistant } from "../utils/dedupMessages";
 import { saveLastView, loadLastView, saveNodePassword, loadNodePassword } from "../utils/localStorage";
@@ -40,82 +43,22 @@ function useIsMobile() {
 }
 
 export function ChatView() {
-  // ---- 登录状态 ----
-  const [authed, setAuthed] = useState(false);
-  const [loginPassword, setLoginPassword] = useState("");
-  const [loginError, setLoginError] = useState<string | null>(null);
-  const [loginLoading, setLoginLoading] = useState(false);
+  const {
+    authed,
+    loginPassword,
+    setLoginPassword,
+    loginError,
+    loginLoading,
+    authFetch,
+    handleLogin,
+    initialLoadDone,
+  } = useBrowserAuth();
 
   const { connected, send, onRawMessage } = useWebSocket(authed);
   const { processStreamLine } = useStreamParser();
 
-  // 清除登录态：session 失效或主动登出时调用，重置加载守卫以便重新登录后能正常加载数据
-  const clearSession = useCallback(() => {
-    initialLoadDone.current = false;
-    setAuthed(false);
-  }, []);
-
-  // 所有受保护接口走 httpOnly cookie（credentials:'include'），token 不进 JS
-  const authFetch = useCallback((url: string) => {
-    return fetch(url, { credentials: 'include' }).then((resp) => {
-      // session 失效 → 清除并回到登录页
-      if (resp.status === 401) {
-        clearSession();
-        throw new Error('SESSION_EXPIRED');
-      }
-      return resp;
-    });
-  }, [clearSession]);
-
-  // 初始化：httpOnly cookie 不可被 JS 读取，先探测现有 session；未登录时尝试 dev 无密码自动登录
-  useEffect(() => {
-    (async () => {
-      try {
-        const r = await fetch("/api/session", { credentials: "include" });
-        if (r.ok) { setAuthed(true); return; }
-      } catch { /* 网络异常，继续尝试自动登录 */ }
-      try {
-        const r = await fetch("/api/login", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ password: "" }),
-          credentials: "include",
-        });
-        if (r.ok) setAuthed(true);
-      } catch { /* 停留在登录页 */ }
-    })();
-  }, []);
-
-  const handleLogin = useCallback(async () => {
-    setLoginLoading(true);
-    setLoginError(null);
-    try {
-      const resp = await fetch("/api/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password: loginPassword }),
-        credentials: "include",
-      });
-      if (resp.ok) {
-        setAuthed(true);
-      } else {
-        const data = await resp.json();
-        setLoginError(data.error || "登录失败");
-      }
-    } catch {
-      setLoginError("网络错误");
-    } finally {
-      setLoginLoading(false);
-    }
-  }, [loginPassword]);
-
-  const handleLogout = useCallback(() => {
-    fetch("/api/logout", { method: "POST", credentials: "include" }).catch(() => {});
-    clearSession();
-  }, [clearSession]);
-
   const isMobile = useIsMobile();
-  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const { sidebarOpen, setSidebarOpen, modelPickerOpen, setModelPickerOpen } = useUi();
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -125,7 +68,6 @@ export function ChatView() {
   const [model, setModel] = useState("");
   const [hasReceivedInit, setHasReceivedInit] = useState(false);
   const [permissionMode, setPermissionMode] = useState<string>("");
-  const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [taskProgress, setTaskProgress] = useState<{
     description: string;
     totalTokens: number;
@@ -151,21 +93,18 @@ export function ChatView() {
   const [pendingAuthNodeId, setPendingAuthNodeId] = useState<string | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
   const [autoAuthInProgress, setAutoAuthInProgress] = useState(false);
-  const [gitStatuses, setGitStatuses] = useState<Map<string, GitStatusResult>>(new Map());
-  const [diffState, setDiffState] = useState<{ filePath: string; projectPath: string; staged: boolean; diff: string } | null>(null);
-  const [fileTrees, setFileTrees] = useState<Map<string, FileTreeNode[]>>(new Map());
-  const [fileTreeErrors, setFileTreeErrors] = useState<Map<string, string>>(new Map());
-  const [fileTreeLoading, setFileTreeLoading] = useState<Set<string>>(new Set());
-  const [fileViewState, setFileViewState] = useState<{
-    filePath: string;
-    projectPath: string;
-    content: string;
-    mimeType: "markdown" | "html" | "code" | "text" | "binary";
-    language?: string;
-  } | null>(null);
+
+  const {
+    gitStatuses, setGitStatuses,
+    diffState, setDiffState,
+    fileTrees, setFileTrees,
+    fileTreeErrors, setFileTreeErrors,
+    fileTreeLoading, setFileTreeLoading,
+    fileViewState, setFileViewState,
+    handleRequestGitStatus, handleFileClick, handleRequestFileTree, handleFileTreeNodeClick,
+  } = useFileBrowser({ send, activeNodeId });
 
   const currentAssistantMessageRef = useRef<ChatMessage | null>(null);
-  const initialLoadDone = useRef(false);
   const pendingSessionRef = useRef<string | null>(null);
   const creatingNewSessionRef = useRef(false);
   const handleRawMessageRef = useRef<((raw: string) => void) | null>(null);
@@ -755,36 +694,6 @@ export function ChatView() {
           s.sessionId === sessionId ? { ...s, status: "idle" as const } : s,
         ),
       );
-    },
-    [send, activeNodeId],
-  );
-
-  const handleRequestGitStatus = useCallback(
-    (projectId: string, projectPath: string) => {
-      send({ type: BrowserCommandType.GetGitStatus, projectPath, projectId, nodeId: activeNodeId || undefined });
-    },
-    [send, activeNodeId],
-  );
-
-  const handleFileClick = useCallback(
-    (filePath: string, projectPath: string, staged: boolean) => {
-      send({ type: BrowserCommandType.GetGitDiff, projectPath, filePath, staged, nodeId: activeNodeId || undefined });
-    },
-    [send, activeNodeId],
-  );
-
-  const handleRequestFileTree = useCallback(
-    (projectPath: string, projectId: string) => {
-      if (fileTrees.has(projectId)) return;
-      setFileTreeLoading((prev) => new Set(prev).add(projectId));
-      send({ type: BrowserCommandType.GetFileTree, projectPath, projectId, nodeId: activeNodeId || undefined });
-    },
-    [send, activeNodeId, fileTrees],
-  );
-
-  const handleFileTreeNodeClick = useCallback(
-    (filePath: string, projectPath: string) => {
-      send({ type: BrowserCommandType.GetFileContent, projectPath, filePath, nodeId: activeNodeId || undefined });
     },
     [send, activeNodeId],
   );
