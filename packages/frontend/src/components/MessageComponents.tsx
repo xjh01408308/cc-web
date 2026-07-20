@@ -7,13 +7,15 @@ import type {
   ThinkingMessage,
   TodoMessage,
   TodoItem,
-  HooksMessage,
 } from "../types";
 import { TimestampComponent } from "./TimestampComponent";
 import { MessageContainer } from "./messages/MessageContainer";
 import { CollapsibleDetails } from "./messages/CollapsibleDetails";
 import { MarkdownRenderer } from "./MarkdownRenderer";
-import { MESSAGE_CONSTANTS } from "../utils/constants";
+import {
+  createSystemMessageView,
+  formatDetailLines,
+} from "../utils/systemMessageUtils";
 import {
   createEditResult,
   createBashPreview,
@@ -21,21 +23,6 @@ import {
   isEditToolUseResult,
   isBashToolUseResult,
 } from "../utils/contentUtils";
-
-// ANSI escape sequence regex for cleaning hooks messages
-const ANSI_REGEX = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
-
-// Type guard to check if the message is a hooks message
-function isHooksMessage(
-  msg: SystemMessage,
-): msg is HooksMessage & { timestamp: number } {
-  return (
-    msg.type === "system" &&
-    "content" in msg &&
-    typeof msg.content === "string" &&
-    !("subtype" in msg)
-  );
-}
 
 interface ChatMessageComponentProps {
   message: ChatMessage;
@@ -79,53 +66,17 @@ interface SystemMessageComponentProps {
 export function SystemMessageComponent({
   message,
 }: SystemMessageComponentProps) {
-  // Generate details based on message type and subtype
-  const getDetails = () => {
-    if (
-      message.type === "system" &&
-      "subtype" in message &&
-      message.subtype === "init"
-    ) {
-      return [
-        `Model: ${message.model}`,
-        `Session: ${message.session_id.substring(0, MESSAGE_CONSTANTS.SESSION_ID_DISPLAY_LENGTH)}`,
-        `Tools: ${message.tools.length} available`,
-        `CWD: ${message.cwd}`,
-        `Permission Mode: ${message.permissionMode}`,
-        `API Key Source: ${message.apiKeySource}`,
-      ].join("\n");
-    } else if (message.type === "result") {
-      const details = [
-        `Duration: ${message.duration_ms}ms`,
-        `Cost: $${message.total_cost_usd.toFixed(4)}`,
-        `Tokens: ${message.usage.input_tokens} in, ${message.usage.output_tokens} out`,
-      ];
-      return details.join("\n");
-    } else if (message.type === "error") {
-      return message.message;
-    } else if (isHooksMessage(message)) {
-      // This is a hooks message - show only the content
-      // Remove ANSI escape sequences for cleaner display
-      return message.content.replace(ANSI_REGEX, "");
-    }
-    return JSON.stringify(message, null, 2);
-  };
-
-  // Get label based on message type
-  const getLabel = () => {
-    if (message.type === "system") return "System";
-    if (message.type === "result") return "Result";
-    if (message.type === "error") return "Error";
-    return "Message";
-  };
-
-  const details = getDetails();
+  const view = createSystemMessageView(message);
+  const details =
+    view.details.kind === "lines"
+      ? formatDetailLines(view.details.lines)
+      : view.details.content;
 
   return (
     <CollapsibleDetails
-      label={getLabel()}
+      label={view.label}
       details={details}
-      badge={"subtype" in message ? message.subtype : undefined}
+      badge={view.badge}
       icon={<span className="bg-blue-400 dark:bg-blue-500">⚙</span>}
       colorScheme={{
         header: "text-blue-800 dark:text-blue-300",
