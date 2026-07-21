@@ -363,6 +363,25 @@ describe("dispatchBrowserEvent — SessionsList", () => {
     expect(ctx.setActiveProjectId).not.toHaveBeenCalled();
   });
 
+  it("pending 匹配 + 有 active + target 带 model/permissionMode → 仍更新二者（切换会话）", () => {
+    const ctx = createMockContext({
+      pendingSessionRef: { current: "s1" },
+      activeSessionId: "existing",
+    });
+    dispatchBrowserEvent(
+      ev({
+        type: BrowserEventType.SessionsList,
+        sessions: [{ sessionId: "s1", projectId: "p1", model: "m", permissionMode: "bypassPermissions" }],
+      }),
+      ctx,
+    );
+    // active 不被覆盖
+    expect(ctx.setActiveSessionId).not.toHaveBeenCalled();
+    // 但 model/permissionMode 要更新（切换会话场景）
+    expect(ctx.setModel).toHaveBeenCalledWith("m");
+    expect(ctx.setPermissionMode).toHaveBeenCalledWith("bypassPermissions");
+  });
+
   it("pending 匹配 + 有 messages → 加载历史 + setHasReceivedInit(true)", () => {
     const ctx = createMockContext({
       pendingSessionRef: { current: "s1" },
