@@ -418,7 +418,9 @@ export function ChatView() {
     (newMode: string) => {
       if (!activeSessionId) return;
       if (newMode === permissionMode) return;
-      setPermissionMode(newMode);
+      // 不乐观更新——permissionMode 以后端回传的 SessionInfo 为准（dispatcher.handleSessionInfo）。
+      // 后端可能 FORCE 锁定权限模式（CLAUDE_FORCE_PERMISSION_MODE），乐观值被覆盖会造成
+      // UI 先跳到新模式再闪回的误导。
       send({
         type: BrowserCommandType.ChangePermissionMode,
         sessionId: activeSessionId,
@@ -464,7 +466,7 @@ export function ChatView() {
         const infoMsg: ChatMessage = {
           type: "chat",
           role: "assistant",
-          content: `权限模式已切换为: ${modeLabel} (${newMode})`,
+          content: `已请求切换权限模式为: ${modeLabel} (${newMode})`,
           timestamp: Date.now(),
         };
         setMessages((prev) => [...prev, infoMsg]);
