@@ -1,4 +1,4 @@
-import { Light as SyntaxHighlighter } from "react-syntax-highlighter";
+import { PrismLight as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
 import ts from "react-syntax-highlighter/dist/esm/languages/prism/typescript";
 import js from "react-syntax-highlighter/dist/esm/languages/prism/javascript";
