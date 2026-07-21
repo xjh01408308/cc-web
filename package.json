@@ -8,7 +8,9 @@
     "dev:relay": "npm -w packages/relay run dev",
     "dev:local": "npm -w packages/local run dev",
     "dev:frontend": "npm -w packages/frontend run dev",
-    "build:frontend": "npm -w packages/frontend run build"
+    "build:frontend": "npm -w packages/frontend run build",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present"
   },
   "dependencies": {
     "react-syntax-highlighter": "^15.6.6"

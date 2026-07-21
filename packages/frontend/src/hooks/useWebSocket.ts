@@ -8,13 +8,16 @@ interface UseWebSocketReturn {
   onRawMessage: (cb: (raw: string) => void) => void;
 }
 
-export function useWebSocket(authed: boolean): UseWebSocketReturn {
+export function useWebSocket(authed: boolean, onAuthLost: () => void): UseWebSocketReturn {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectDelay = useRef(2000);
   const mounted = useRef(true);
   const rawMessageCb = useRef<((raw: string) => void) | null>(null);
   const pendingQueue = useRef<BrowserCommand[]>([]);
+  // ref 存最新回调，避免进 connect 依赖导致重连（与 onRawMessage 同模式）
+  const onAuthLostRef = useRef(onAuthLost);
+  onAuthLostRef.current = onAuthLost;
 
   const [connected, setConnected] = useState(false);
 
@@ -54,6 +57,12 @@ export function useWebSocket(authed: boolean): UseWebSocketReturn {
       if (!mounted.current) return;
       wsRef.current = null;
       setConnected(false);
+      // relay 重启等场景下 cookie 仍在但 relay 内存 session 丢失，WS 握手被 401 拒绝。
+      // 原生 WebSocket 不暴露握手 HTTP 状态码，故用 HTTP 探测区分：失效则跳登录页，
+      // 避免无限重连；网络不可达（fetch reject）则照常重连。
+      fetch("/api/session", { credentials: "include" })
+        .then((r) => { if (mounted.current && !r.ok) onAuthLostRef.current?.(); })
+        .catch(() => {});
       // 自动重连
       reconnectTimer.current = setTimeout(() => {
         reconnectTimer.current = null;
