@@ -344,13 +344,16 @@ function handleSessionsList(event: SessionsListEvent, ctx: DispatchContext): voi
   if (!pendingId) return;
   const target = event.sessions.find((s) => s.sessionId === pendingId);
   if (!target) return;
-  // 恢复活跃会话状态（HTTP 认证失败时通过 WebSocket 恢复）
+  // 恢复活跃会话（HTTP 认证失败时通过 WebSocket 恢复）：仅在未选中时设置 active
   if (!ctx.activeSessionId) {
     ctx.setActiveSessionId(target.sessionId);
     ctx.setActiveProjectId(target.projectId);
-    if (target.model) ctx.setModel(target.model);
-    if (target.permissionMode) ctx.setPermissionMode(target.permissionMode);
   }
+  // model/permissionMode 必须在守卫外更新：切换会话时 handleSelectSession 已先
+  // setActiveSessionId 再 resetForSessionChange 清空二者，若放在守卫内则永远跳过，
+  // 导致切换后 permissionMode 停留 "" → 回退 acceptEdits 显示"读写"
+  if (target.model) ctx.setModel(target.model);
+  if (target.permissionMode) ctx.setPermissionMode(target.permissionMode);
   if (target.messages && target.messages.length > 0) {
     const msgs = target.messages as unknown as Record<string, unknown>[];
     const historyProcessor = new UnifiedMessageProcessor();
