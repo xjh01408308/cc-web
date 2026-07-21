@@ -48,6 +48,7 @@ function useIsMobile() {
 export function ChatView() {
   const {
     authed,
+    clearSession,
     loginPassword,
     setLoginPassword,
     loginError,
@@ -57,7 +58,8 @@ export function ChatView() {
     initialLoadDone,
   } = useBrowserAuth();
 
-  const { connected, send, onRawMessage } = useWebSocket(authed);
+  // WS 被动断开后探测到 session 失效（如 relay 重启丢内存 session）时清登录态，跳回登录页
+  const { connected, send, onRawMessage } = useWebSocket(authed, clearSession);
   const { processStreamLine } = useStreamParser();
 
   const isMobile = useIsMobile();
