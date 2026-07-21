@@ -15,6 +15,11 @@ const AUTH_COOLDOWN_MS = 60000;
 const PING_INTERVAL_MS = 30000;
 const HTTP_REQUEST_TIMEOUT_MS = 5000;
 const AUTH_TIMEOUT_MS = 5000;
+// AuthNode 单次请求-响应超时后的重试上限（含首次）：跨公网偶发丢包容错
+const MAX_AUTH_ATTEMPTS = 2;
+// local 链路假死判定阈值：跨公网链路可能 TCP 假死（两端 ws 仍 OPEN 但中间断），
+// 超过此时间没收到 local 任何消息（含 pong）→ 主动关闭触发 local ws-client 重连重建。
+const LOCAL_IDLE_TIMEOUT_MS = 90000;
 const BROWSER_REQUEST_TIMEOUT_MS = 10000;
 
 /**
@@ -207,6 +212,8 @@ export class ConnectionHandler {
         }
         const authNode = this.nodes.get(authNodeId)!;
         const reqId = randomUUID();
+        // callback 闭包引用 timeout（let）：重试时重新赋值，clearTimeout 能取到最新句柄
+        let timeout: ReturnType<typeof setTimeout>;
         this.matcher.register(reqId, (resultMsg) => {
           clearTimeout(timeout);
           const result = resultMsg as LocalEvent;
@@ -223,13 +230,28 @@ export class ConnectionHandler {
           const error = result.type === LocalEventType.AuthResult ? result.error : undefined;
           this.send(ws, { type: BrowserEventType.AuthResult, nodeId: authNodeId, success, error });
         });
-        const timeout = setTimeout(() => {
-          if (this.matcher.has(reqId)) {
-            this.matcher.take(reqId);
-            this.send(ws, { type: BrowserEventType.AuthResult, nodeId: authNodeId, success: false, error: '认证超时' });
-          }
-        }, AUTH_TIMEOUT_MS);
-        this.send(authNode.ws, { type: LocalCommandType.AuthNode, password, _reqId: reqId });
+        // 跨公网（local 本地 ↔ relay 云主机）偶发丢包会让单次 AuthNode 超时；超时后
+        // 重发一次（matcher 里的 callback 仍在，local 迟到的回包也会被正确匹配），
+        // 用尽 MAX_AUTH_ATTEMPTS 才向浏览器报"认证超时"。
+        let authRetry = 0;
+        const sendAuthToNode = (): void => {
+          this.send(authNode.ws, { type: LocalCommandType.AuthNode, password, _reqId: reqId });
+        };
+        const scheduleAuthTimeout = (): void => {
+          timeout = setTimeout(() => {
+            if (!this.matcher.has(reqId)) return;
+            authRetry++;
+            if (authRetry < MAX_AUTH_ATTEMPTS) {
+              sendAuthToNode();
+              scheduleAuthTimeout();
+            } else {
+              this.matcher.take(reqId);
+              this.send(ws, { type: BrowserEventType.AuthResult, nodeId: authNodeId, success: false, error: '认证超时' });
+            }
+          }, AUTH_TIMEOUT_MS);
+        };
+        sendAuthToNode();
+        scheduleAuthTimeout();
         return;
       }
 
@@ -325,6 +347,8 @@ export class ConnectionHandler {
   // ---- 本地服务消息处理 ----
 
   private handleLocalMessage(ws: WebSocket, msg: LocalEvent): void {
+    // local 每发一条消息（含 pong）都更新活跃时间，供心跳做链路假死检测
+    this.states.touch(ws);
     // HTTP API / AuthNode 响应匹配
     const reqId = (msg as unknown as Record<string, unknown>)._reqId as string | undefined;
     if (reqId) {
@@ -518,10 +542,21 @@ export class ConnectionHandler {
       console.error(`[relay] 本地连接错误 | IP: ${ip} | ${err.message}`);
     });
 
-    // 心跳
+    // 心跳 + 链路假死检测
     const heartbeat = setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) {
         this.send(ws, { type: LocalControlType.Ping });
+        // 跨公网链路可能 TCP 假死（local 侧 ws 仍 OPEN，故 local 端无重连日志）：
+        // 超过 LOCAL_IDLE_TIMEOUT_MS 没收到 local 任何消息 → 主动关闭，触发 local
+        // ws-client 重连重建一条干净链路；否则 relay 会一直往死连接上发 AuthNode 必然超时
+        const last = this.states.lastSeenOf(ws);
+        if (last && Date.now() - last >= LOCAL_IDLE_TIMEOUT_MS) {
+          const idle = Math.round((Date.now() - last) / 1000);
+          console.warn(`[relay] local 链路假死（${idle}s 无消息），主动关闭重建 | IP: ${ip}`);
+          clearInterval(heartbeat);
+          ws.close();
+          return;
+        }
       } else {
         clearInterval(heartbeat);
       }

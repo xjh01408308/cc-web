@@ -173,14 +173,25 @@ describe("dispatchBrowserEvent — AuthResult", () => {
     expect(loadLastView).not.toHaveBeenCalled();
   });
 
-  it("失败 → 移除密码、设置错误", () => {
+  it("密码错误 → 移除保存密码、设置错误", () => {
     const ctx = createMockContext();
     dispatchBrowserEvent(
-      ev({ type: BrowserEventType.AuthResult, nodeId: "n1", success: false, error: "bad pw" }),
+      ev({ type: BrowserEventType.AuthResult, nodeId: "n1", success: false, error: "密码错误" }),
       ctx,
     );
     expect(removeNodePassword).toHaveBeenCalledWith("n1");
-    expect(ctx.setAuthError).toHaveBeenCalledWith("bad pw");
+    expect(ctx.setAuthError).toHaveBeenCalledWith("密码错误");
+    expect(ctx.setAutoAuthInProgress).toHaveBeenCalledWith(false);
+  });
+
+  it("认证超时 → 不移除保存密码（链路瞬时问题非密码错），仍设置错误", () => {
+    const ctx = createMockContext();
+    dispatchBrowserEvent(
+      ev({ type: BrowserEventType.AuthResult, nodeId: "n1", success: false, error: "认证超时" }),
+      ctx,
+    );
+    expect(removeNodePassword).not.toHaveBeenCalled();
+    expect(ctx.setAuthError).toHaveBeenCalledWith("认证超时");
     expect(ctx.setAutoAuthInProgress).toHaveBeenCalledWith(false);
   });
 

@@ -193,3 +193,42 @@ describe("useNodeAuth — handleAuthNode", () => {
     expect(result.current.authError).toBeNull();
   });
 });
+
+describe("useNodeAuth — 超时自动重试（限次）", () => {
+  it("Effect 路径：setAutoAuthInProgress(false)（模拟 dispatcher 收到超时）触发重发，达 MAX(2) 次后停止", () => {
+    const send = vi.fn();
+    mockLoadNodePassword.mockReturnValue("pw");
+    const { result } = renderAuth({ send });
+
+    act(() => result.current.setPendingAuthNodeId("node-1"));
+    // Effect 首次发送（计数 0→1）
+    expect(send).toHaveBeenCalledTimes(1);
+
+    // 模拟 dispatcher 收到"认证超时"：autoAuthInProgress 回 false 触发 Effect 重跑
+    act(() => result.current.setAutoAuthInProgress(false));
+    // 计数 1<2，重发（1→2）
+    expect(send).toHaveBeenCalledTimes(2);
+
+    act(() => result.current.setAutoAuthInProgress(false));
+    // 计数 2>=2，停止重发
+    expect(send).toHaveBeenCalledTimes(2);
+  });
+
+  it("tryAutoAuth 路径：首轮发送已计入计数，Effect 仅再重试到 MAX", () => {
+    const send = vi.fn();
+    mockLoadNodePassword.mockReturnValue("pw");
+    const { result } = renderAuth({ send });
+
+    act(() => { result.current.tryAutoAuth("node-1"); });
+    // tryAutoAuth 首次发送（计数设为 1）
+    expect(send).toHaveBeenCalledTimes(1);
+
+    act(() => result.current.setAutoAuthInProgress(false));
+    // 计数 1<2，Effect 重发（1→2）
+    expect(send).toHaveBeenCalledTimes(2);
+
+    act(() => result.current.setAutoAuthInProgress(false));
+    // 计数 2>=2，停
+    expect(send).toHaveBeenCalledTimes(2);
+  });
+});

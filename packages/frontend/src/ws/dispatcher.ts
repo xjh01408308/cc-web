@@ -258,7 +258,11 @@ function handleAuthResult(event: AuthResultEvent, ctx: DispatchContext): void {
       }
     }
   } else {
-    removeNodePassword(resultNodeId);
+    // 仅"密码错误"才删保存密码；"认证超时"/速率限制等多为跨公网链路瞬时丢包，
+    // 密码本身可能没错 —— 删了会导致下次刷新无法自动认证（问题自我加重）。
+    if (event.error === "密码错误") {
+      removeNodePassword(resultNodeId);
+    }
     ctx.setAutoAuthInProgress(false);
     if (ctx.autoAuthTimeoutRef.current) {
       clearTimeout(ctx.autoAuthTimeoutRef.current);
