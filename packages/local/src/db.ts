@@ -34,11 +34,17 @@ function initTables(): void {
       status            TEXT NOT NULL DEFAULT 'idle',
       message_count     INTEGER NOT NULL DEFAULT 0,
       created_at        INTEGER NOT NULL,
-      claude_session_id TEXT
+      claude_session_id TEXT,
+      model             TEXT
     );
 
     CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id, created_at DESC);
   `);
+  // 迁移：CREATE TABLE IF NOT EXISTS 不重建已存在的旧表，需手动补 model 列
+  const cols = db.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>;
+  if (!cols.some((c) => c.name === 'model')) {
+    db.exec('ALTER TABLE sessions ADD COLUMN model TEXT');
+  }
 }
 
 // ─── Project CRUD ────────────────────────────────────────
@@ -80,15 +86,16 @@ export interface SessionRow {
   message_count: number;
   created_at: number;
   claude_session_id: string | null;
+  model: string | null;
 }
 
-export function createSession(id: string, projectId: string): SessionRow {
+export function createSession(id: string, projectId: string, model?: string): SessionRow {
   const d = getDb();
   const now = Date.now();
   d.prepare(
-    'INSERT INTO sessions (id, project_id, summary, status, message_count, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-  ).run(id, projectId, '', 'idle', 0, now);
-  return { id, project_id: projectId, summary: '', status: 'idle', message_count: 0, created_at: now, claude_session_id: null };
+    'INSERT INTO sessions (id, project_id, summary, status, message_count, created_at, model) VALUES (?, ?, ?, ?, ?, ?, ?)',
+  ).run(id, projectId, '', 'idle', 0, now, model ?? null);
+  return { id, project_id: projectId, summary: '', status: 'idle', message_count: 0, created_at: now, claude_session_id: null, model: model ?? null };
 }
 
 export function getSession(id: string): SessionRow | undefined {

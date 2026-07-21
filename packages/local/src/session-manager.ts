@@ -6,7 +6,7 @@ import type { StreamResponse, SessionInfo, ProjectInfo, LocalEvent } from './typ
 import { LocalEventType } from './types.js';
 import * as db from './db.js';
 import { validateProjectPath } from './file-utils.js';
-import { WORKSPACE_ROOT } from './config.js';
+import { WORKSPACE_ROOT, FORCE_PERMISSION_MODE } from './config.js';
 
 // ─── 传输注入（依赖反转：领域层不静态 import 传输层）──────────────────────────
 // 领域层（本模块）只持有传输端点的抽象引用（Sender），由 composition root
@@ -130,7 +130,7 @@ export function createSession(projectId: string, projectPath: string, model?: st
   const pathError = validateProjectPath(projectPath, WORKSPACE_ROOT);
   if (pathError) throw new Error(pathError);
   const sessionId = randomUUID();
-  const row = db.createSession(sessionId, projectId);
+  const row = db.createSession(sessionId, projectId, model);
   const session: Session = {
     sessionId,
     projectId,
@@ -485,6 +485,10 @@ export function loadPersistedSessions(): void {
         runner: null,
         createdAt: row.created_at,
         claudeSessionId: row.claude_session_id || undefined,
+        model: row.model || undefined,
+        // FORCE_PERMISSION_MODE 锁定时覆盖持久化会话（db 未存 permissionMode），
+        // 否则重启后旧会话 permissionMode 丢失 → 前端回退 acceptEdits、createRunner 实际降级
+        permissionMode: FORCE_PERMISSION_MODE || undefined,
       };
       sessions.set(row.id, session);
     }
