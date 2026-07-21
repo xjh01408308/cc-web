@@ -1,5 +1,4 @@
 import type { SystemMessage, HooksMessage } from "../types";
-import { fromSDKPermissionMode } from "../types";
 import { MESSAGE_CONSTANTS } from "./constants";
 
 // 一个 label:value 行——系统消息里 init/result 的 details 由这种行组成。
@@ -61,7 +60,7 @@ export function createSystemMessageView(msg: SystemMessage): SystemMessageView {
           { label: "CWD", value: msg.cwd },
           {
             label: "Permission Mode",
-            value: fromSDKPermissionMode(msg.permissionMode),
+            value: msg.permissionMode,
           },
           { label: "API Key Source", value: msg.apiKeySource },
         ],

@@ -65,9 +65,9 @@ describe("createSystemMessageView — init", () => {
     expect(linesAsMap(view)["Session"]).toBe("abcdefgh");
   });
 
-  it("routes permissionMode through fromSDKPermissionMode (bypassPermissions → default)", () => {
+  it("renders permissionMode as-is (bypassPermissions → bypassPermissions)", () => {
     const view = createSystemMessageView(initMsg({ permissionMode: "bypassPermissions" }));
-    expect(linesAsMap(view)["Permission Mode"]).toBe("default");
+    expect(linesAsMap(view)["Permission Mode"]).toBe("bypassPermissions");
   });
 });
 

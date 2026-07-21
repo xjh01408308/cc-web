@@ -3,7 +3,6 @@ import type {
   SDKAssistantMessage,
   SDKSystemMessage,
   SDKResultMessage,
-  PermissionMode as SDKPermissionMode,
 } from "@anthropic-ai/claude-code";
 
 // Chat message for user/assistant interactions (not part of SDKMessage)
@@ -169,20 +168,8 @@ export function isTodoMessage(message: AllMessage): message is TodoMessage {
   return message.type === "todo";
 }
 
-// Permission mode types (UI-focused subset of SDK PermissionMode)
-export type PermissionMode = "default" | "plan" | "acceptEdits";
-
-// SDK type integration utilities
-export function toSDKPermissionMode(uiMode: PermissionMode): SDKPermissionMode {
-  return uiMode as SDKPermissionMode;
-}
-
-export function fromSDKPermissionMode(
-  sdkMode: SDKPermissionMode,
-): PermissionMode {
-  // Filter out bypassPermissions for UI
-  return sdkMode === "bypassPermissions" ? "default" : sdkMode;
-}
+// Permission mode types（含 bypassPermissions：FORCE_PERMISSION_MODE 锁定时需如实呈现）
+export type PermissionMode = "default" | "plan" | "acceptEdits" | "bypassPermissions";
 
 // Chat state extensions for permission mode
 export interface ChatStatePermissions {
