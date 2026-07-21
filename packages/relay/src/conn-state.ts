@@ -6,6 +6,7 @@ import type { WebSocket } from 'ws';
 export interface ConnState {
   ip: string;
   connectedAt: number;
+  lastSeen: number;     // 最近一次收到该 ws 消息的时间（local 链路假死检测用）
   nodeId?: string;       // local 连接 register 后写；undefined 表示尚未注册
   sessionId?: string;    // browser 订阅会话后写
 }
@@ -14,7 +15,7 @@ export class ConnStates {
   private m = new WeakMap<WebSocket, ConnState>();
 
   init(ws: WebSocket, ip: string, now: number = Date.now()): ConnState {
-    const s: ConnState = { ip, connectedAt: now };
+    const s: ConnState = { ip, connectedAt: now, lastSeen: now };
     this.m.set(ws, s);
     return s;
   }
@@ -39,5 +40,15 @@ export class ConnStates {
 
   getSessionId(ws: WebSocket): string | undefined {
     return this.m.get(ws)?.sessionId;
+  }
+
+  /** 更新链路活跃时间（local 每收一条消息调一次，含 pong，用于假死检测） */
+  touch(ws: WebSocket, now: number = Date.now()): void {
+    const s = this.m.get(ws);
+    if (s) s.lastSeen = now;
+  }
+
+  lastSeenOf(ws: WebSocket): number | undefined {
+    return this.m.get(ws)?.lastSeen;
   }
 }

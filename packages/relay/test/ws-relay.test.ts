@@ -184,17 +184,66 @@ describe('ConnectionHandler', () => {
     });
   });
 
-  describe('AuthNode 超时回归', () => {
-    // 重构曾丢失超时分支的 nodeId（成功分支有、超时分支漏）—— 此测试钉住该字段
-    it('超时响应必须带 nodeId', () => {
+  describe('AuthNode 超时重试（跨公网丢包容错）', () => {
+    it('5s 超时后重发一次 → local 收到两次 auth_node，浏览器尚未收到失败', () => {
+      const h = new ConnectionHandler();
+      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip'); registerNode(local, 'n1', { passwordRequired: true });
+      const browser = mockWs(); h.handleBrowserConnection(browser.ws, 'ip');
+      browser.sent.length = 0; local.sent.length = 0;
+      sendMsg(browser, { type: BrowserCommandType.AuthNode, nodeId: 'n1', password: 'any' });
+      expect(local.sent.filter((m) => (m as { type?: string }).type === 'auth_node')).toHaveLength(1);
+      // local 一直不回 → 5s 后重发
+      vi.advanceTimersByTime(5000);
+      expect(local.sent.filter((m) => (m as { type?: string }).type === 'auth_node')).toHaveLength(2);
+      // 浏览器尚未收到 auth_result（重试窗口内不报失败）
+      expect(browser.sent.find((m) => (m as { type?: string }).type === 'auth_result')).toBeUndefined();
+    });
+
+    it('两次都超时 → 报"认证超时"（带 nodeId）', () => {
       const h = new ConnectionHandler();
       const local = mockWs(); h.handleLocalConnection(local.ws, 'ip'); registerNode(local, 'n1', { passwordRequired: true });
       const browser = mockWs(); h.handleBrowserConnection(browser.ws, 'ip');
       browser.sent.length = 0;
       sendMsg(browser, { type: BrowserCommandType.AuthNode, nodeId: 'n1', password: 'any' });
-      // local 收到 auth_node 但故意不回 → 触发 5s 超时
-      vi.advanceTimersByTime(5000);
+      vi.advanceTimersByTime(5000);  // 首次超时 → 重发
+      vi.advanceTimersByTime(5000);  // 二次超时 → 报失败
       expect(browser.sent).toContainEqual({ type: BrowserEventType.AuthResult, nodeId: 'n1', success: false, error: '认证超时' });
+    });
+
+    it('首次丢包、重试时 local 回包 → 认证成功（迟到回包无害）', () => {
+      const h = new ConnectionHandler();
+      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip'); registerNode(local, 'n1', { passwordRequired: true });
+      const browser = mockWs(); h.handleBrowserConnection(browser.ws, 'ip');
+      browser.sent.length = 0; local.sent.length = 0;
+      sendMsg(browser, { type: BrowserCommandType.AuthNode, nodeId: 'n1', password: 'any' });
+      const req = local.sent.find((m) => (m as { type?: string }).type === 'auth_node') as { _reqId?: string };
+      vi.advanceTimersByTime(5000);  // 首次超时 → 重发（同 _reqId）
+      // local 对重发的 auth_node 回成功
+      sendMsg(local, { type: LocalEventType.AuthResult, _reqId: req!._reqId, success: true });
+      expect(browser.sent).toContainEqual({ type: BrowserEventType.AuthResult, nodeId: 'n1', success: true });
+    });
+  });
+
+  describe('local 链路假死检测', () => {
+    it('local 超过 LOCAL_IDLE_TIMEOUT_MS(90s) 无任何消息 → 心跳主动关闭触发重连', () => {
+      const h = new ConnectionHandler();
+      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip'); registerNode(local, 'n1');
+      expect(local.closed).toBe(false);
+      // local 既不回 pong 也不发任何消息 → 3 个 ping 周期（90s）后判定假死
+      vi.advanceTimersByTime(90000);
+      expect(local.closed).toBe(true);
+    });
+
+    it('local 正常回 pong → 持续活跃，不关闭', () => {
+      const h = new ConnectionHandler();
+      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip'); registerNode(local, 'n1');
+      // 每个 ping 周期内 local 回 pong，模拟链路正常
+      vi.advanceTimersByTime(30000);
+      sendMsg(local, { type: LocalEventType.Pong });
+      vi.advanceTimersByTime(30000);
+      sendMsg(local, { type: LocalEventType.Pong });
+      vi.advanceTimersByTime(30000);
+      expect(local.closed).toBe(false);
     });
   });
 });

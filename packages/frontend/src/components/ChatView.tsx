@@ -95,6 +95,11 @@ export function ChatView() {
     tryAutoAuth, handleAuthNode,
   } = useNodeAuth({ send, connected });
 
+  // HTTP 401 auth_required 响应可能晚于 WS 自动认证到达 —— 读最新认证态避免过时 401
+  // 重新触发弹窗（auth_required 回调闭包不含 authenticatedNodes，须用 ref）
+  const authenticatedNodesRef = useRef(authenticatedNodes);
+  authenticatedNodesRef.current = authenticatedNodes;
+
   const {
     gitStatuses, setGitStatuses,
     diffState, setDiffState,
@@ -136,7 +141,10 @@ export function ChatView() {
             .then((r) => r.json())
             .then((projData) => {
               if ((projData as { error?: string }).error === 'auth_required') {
-                setPendingAuthNodeId(restoreNodeId);
+                // WS 认证可能已在此 HTTP 响应到达前完成 —— 已认证则忽略过时 401
+                if (!authenticatedNodesRef.current.has(restoreNodeId)) {
+                  setPendingAuthNodeId(restoreNodeId);
+                }
                 return;
               }
               setProjects(projData as ProjectInfo[]);
@@ -146,7 +154,9 @@ export function ChatView() {
             .then((r) => r.json())
             .then((sessData: SessionInfo[] | { error?: string }) => {
               if ('error' in sessData && sessData.error === 'auth_required') {
-                setPendingAuthNodeId(restoreNodeId);
+                if (!authenticatedNodesRef.current.has(restoreNodeId)) {
+                  setPendingAuthNodeId(restoreNodeId);
+                }
                 return;
               }
               const sessions = sessData as SessionInfo[];
@@ -350,7 +360,9 @@ export function ChatView() {
         .then((r) => r.json())
         .then((data) => {
           if ((data as { error?: string }).error === 'auth_required') {
-            setPendingAuthNodeId(nodeId);
+            if (!authenticatedNodesRef.current.has(nodeId)) {
+              setPendingAuthNodeId(nodeId);
+            }
             return;
           }
           setProjects(data as ProjectInfo[]);
@@ -361,7 +373,9 @@ export function ChatView() {
         .then((r) => r.json())
         .then((data) => {
           if ((data as { error?: string }).error === 'auth_required') {
-            setPendingAuthNodeId(nodeId);
+            if (!authenticatedNodesRef.current.has(nodeId)) {
+              setPendingAuthNodeId(nodeId);
+            }
             return;
           }
           setSessions(data as SessionInfo[]);
