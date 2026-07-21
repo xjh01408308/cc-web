@@ -2,17 +2,28 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { renderHook, act, waitFor } from "@testing-library/react";
 import { useBrowserAuth } from "./useBrowserAuth";
+import { isDevelopment } from "../utils/environment";
 
-// 构造极简 Response 形状（useBrowserAuth 只用 ok/status/json）。
+// 默认 DEV=true 以保留 mount effect 的 dev 自动登录行为；prod 用例单独覆盖
+vi.mock("../utils/environment", () => ({
+  isDevelopment: vi.fn(() => true),
+  isProduction: vi.fn(() => false),
+}));
+const mockedIsDevelopment = vi.mocked(isDevelopment);
+
+// 构造极简 Response 形状（useBrowserAuth 只用 ok/status/json/clone）。
 function mockResponse(ok: boolean, body: unknown = {}): Response {
-  return {
+  const resp = {
     ok,
     status: ok ? 200 : 401,
     json: async () => body,
-  } as unknown as Response;
+    clone() { return resp; },
+  };
+  return resp as unknown as Response;
 }
 
 beforeEach(() => {
+  mockedIsDevelopment.mockReturnValue(true);
   vi.stubGlobal("fetch", vi.fn());
 });
 
@@ -65,6 +76,20 @@ describe("useBrowserAuth — 自动登录探测（mount effect）", () => {
 
     const { result } = renderHook(() => useBrowserAuth());
     await waitFor(() => expect(result.current.authed).toBe(true));
+  });
+
+  it("prod 下无 session → 不尝试空密码 login（无 /api/login 调用）", async () => {
+    mockedIsDevelopment.mockReturnValue(false);
+    const fetchMock = vi.fn((_url: string) => Promise.resolve(mockResponse(false)));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderHook(() => useBrowserAuth());
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+
+    const urls = fetchMock.mock.calls.map((c) => c[0] as string);
+    expect(urls.some((u) => u.includes("/api/session"))).toBe(true);
+    expect(urls.some((u) => u.includes("/api/login"))).toBe(false);
+    expect(result.current.authed).toBe(false);
   });
 });
 
@@ -134,7 +159,7 @@ describe("useBrowserAuth — authFetch（401 session 失效）", () => {
   it("401 → 抛 SESSION_EXPIRED 并 clearSession", async () => {
     const fetchMock = vi.fn((url: string) => {
       if (url === "/api/protected") {
-        return Promise.resolve({ ok: false, status: 401, json: async () => ({}) } as unknown as Response);
+        return Promise.resolve(mockResponse(false, {}));
       }
       // mount effect 让 authed=true
       return Promise.resolve(mockResponse(true));
@@ -153,6 +178,26 @@ describe("useBrowserAuth — authFetch（401 session 失效）", () => {
     expect((caught as Error).message).toBe("SESSION_EXPIRED");
     expect(result.current.authed).toBe(false); // clearSession 重置
     expect(result.current.initialLoadDone.current).toBe(false); // 加载守卫重置
+  });
+
+  it("401 auth_required（节点密码拦截）→ 透传 response，不清登录态", async () => {
+    const fetchMock = vi.fn((url: string) => {
+      if (url === "/api/projects") {
+        return Promise.resolve(mockResponse(false, { error: 'auth_required', message: '此节点需要密码认证' }));
+      }
+      return Promise.resolve(mockResponse(true));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderHook(() => useBrowserAuth());
+    await waitFor(() => expect(result.current.authed).toBe(true));
+
+    let resp: Response | undefined;
+    await act(async () => { resp = await result.current.authFetch("/api/projects"); });
+
+    expect(resp?.status).toBe(401);
+    expect((await resp!.json()).error).toBe('auth_required');
+    expect(result.current.authed).toBe(true); // 未被 clearSession 踢回登录页
   });
 
   it("200 → 正常返回 Response", async () => {

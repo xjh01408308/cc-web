@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from "react";
+import { isDevelopment } from "../utils/environment";
 
 // 浏览器层认证（httpOnly cookie 访问密码）。与节点层认证（useNodeAuth，PR-5）
 // 是两套独立 state，不合 useAuth —— "auth" 是 overloaded 词，见 CONTEXT.md。
@@ -19,24 +20,28 @@ export function useBrowserAuth() {
   }, []);
 
   // 所有受保护接口走 httpOnly cookie（credentials:'include'），token 不进 JS
-  const authFetch = useCallback((url: string) => {
-    return fetch(url, { credentials: 'include' }).then((resp) => {
-      // session 失效 → 清除并回到登录页
-      if (resp.status === 401) {
-        clearSession();
-        throw new Error('SESSION_EXPIRED');
-      }
-      return resp;
-    });
+  const authFetch = useCallback(async (url: string) => {
+    const resp = await fetch(url, { credentials: 'include' });
+    if (resp.status === 401) {
+      // 区分两种 401：节点密码拦截（auth_required）透传 response 给调用方弹节点密码框；
+      // 仅 session 失效（未认证）才清登录态回登录页。
+      const data = await resp.clone().json().catch(() => null) as { error?: string } | null;
+      if (data?.error === 'auth_required') return resp;
+      clearSession();
+      throw new Error('SESSION_EXPIRED');
+    }
+    return resp;
   }, [clearSession]);
 
-  // 初始化：httpOnly cookie 不可被 JS 读取，先探测现有 session；未登录时尝试 dev 无密码自动登录
+  // 初始化：httpOnly cookie 不可被 JS 读取，先探测现有 session；未登录时仅在 dev 模式尝试
+  // 空密码自动登录。prod 下 RELAY_PASSWORD 非空，空密码必然 401，跳过以避免每次打开页面的无谓日志噪音。
   useEffect(() => {
     (async () => {
       try {
         const r = await fetch("/api/session", { credentials: "include" });
         if (r.ok) { setAuthed(true); return; }
-      } catch { /* 网络异常，继续尝试自动登录 */ }
+      } catch { /* 网络异常，继续尝试自动登录（仅 dev） */ }
+      if (!isDevelopment()) return;
       try {
         const r = await fetch("/api/login", {
           method: "POST",
