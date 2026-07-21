@@ -7,7 +7,7 @@ echo ============================================
 echo.
 
 echo [1/2] Stopping old local process...
-taskkill /FI "WINDOWTITLE eq cc-web-local" /F >nul 2>&1
+taskkill /FI "WINDOWTITLE eq cc-web-local" /F /T >nul 2>&1
 timeout /t 2 /nobreak >nul
 echo   Done
 echo.
