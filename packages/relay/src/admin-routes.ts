@@ -9,6 +9,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { UserStore, UserRole } from './user-store.js';
 import type { NodeStore, CreatedNode } from './node-store.js';
+import type { AssignmentStore } from './assignment-store.js';
 import { jsonResponse, readBody } from './http-utils.js';
 
 /** 当前 session 的管理视图子集（index.ts 的 Session 结构兼容：含 userId/username/role 即可） */
@@ -21,6 +22,7 @@ export interface AdminSession {
 export interface AdminRouteDeps {
   session: AdminSession | null;
   userStore: UserStore;
+  assignmentStore: AssignmentStore;
 }
 
 /**
@@ -124,12 +126,40 @@ export async function handleAdminUsersRoute(
     }
   }
 
-  // /api/admin/users/:id —— 删除
+  // /api/admin/users/:id/nodes —— Assignment 管理（issue #24）：以 user 为中心分配 / 撤销 Node。
+  //   GET → { assigned: nodeId[] }（当前授权集）；PUT { nodeIds } → 全量替换（增删一体）。
+  //   目标必须是普通 user（admin 无需 Assignment，全访问）。
+  if (segments.length === 5 && segments[4] === 'nodes' && (method === 'GET' || method === 'PUT')) {
+    if (!requireAdmin(res, deps.session)) return true;
+    const target = ensureTargetIsUser(res, deps.userStore, segments[3]);
+    if (!target) return true;
+    if (method === 'GET') {
+      jsonResponse(res, { assigned: deps.assignmentStore.assignedNodeIds(target.id) });
+      return true;
+    }
+    try {
+      const parsed = JSON.parse((await readBody(req)) || '{}') as { nodeIds?: unknown };
+      if (!Array.isArray(parsed.nodeIds)) {
+        jsonResponse(res, { error: 'nodeIds 必须是数组' }, 400);
+        return true;
+      }
+      const nodeIds = parsed.nodeIds.filter((n): n is string => typeof n === 'string' && n.length > 0);
+      deps.assignmentStore.setAssigned(target.id, nodeIds);
+      jsonResponse(res, { ok: true });
+      return true;
+    } catch {
+      jsonResponse(res, { error: '请求格式错误' }, 400);
+      return true;
+    }
+  }
+
+  // /api/admin/users/:id —— 删除（级联清理该 user 的 Assignment）
   if (segments.length === 4 && method === 'DELETE') {
     if (!requireAdmin(res, deps.session)) return true;
     const target = ensureTargetIsUser(res, deps.userStore, segments[3]);
     if (!target) return true;
     deps.userStore.deleteUser(target.id);
+    deps.assignmentStore.revokeAllForUser(target.id);
     jsonResponse(res, { ok: true });
     return true;
   }
@@ -144,6 +174,7 @@ export async function handleAdminUsersRoute(
 export interface NodeRouteDeps {
   session: AdminSession | null;
   nodeStore: NodeStore;
+  assignmentStore: AssignmentStore;
 }
 
 /**
@@ -213,14 +244,16 @@ export async function handleAdminNodesRoute(
     return true;
   }
 
-  // /api/admin/nodes/:id —— 删除
+  // /api/admin/nodes/:id —— 删除（级联清理指向该 node 的 Assignment）
   if (segments.length === 4 && method === 'DELETE') {
     if (!requireAdmin(res, deps.session)) return true;
-    const ok = deps.nodeStore.deleteNode(segments[3]);
-    if (!ok) {
+    const node = deps.nodeStore.getNodeById(segments[3]);
+    if (!node) {
       jsonResponse(res, { error: '节点不存在' }, 404);
       return true;
     }
+    deps.nodeStore.deleteNode(node.id);
+    deps.assignmentStore.revokeAllForNode(node.node_id);
     jsonResponse(res, { ok: true });
     return true;
   }

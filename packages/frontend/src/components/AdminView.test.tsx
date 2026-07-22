@@ -108,6 +108,93 @@ describe("AdminView — admin 用户管理", () => {
   });
 });
 
+describe("AdminView — admin 分配节点（Assignment）", () => {
+  // alice(user) 可分配；admin 行无"分配节点"按钮。提供 dev-laptop / build-server 两个预注册节点。
+  function assignFetchMock(handlers: { onGetAssign?: () => unknown; onPutAssign?: (body: unknown) => unknown } = {}) {
+    return vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.includes("/api/session")) return mockResponse(true, { user: { username: "admin", role: "admin" } });
+      if (url.includes("/api/admin/users")) {
+        // /api/admin/users/:id/nodes（须在通用 users 匹配前判）
+        if (url.includes("/nodes")) {
+          if ((init?.method) === "PUT") return mockResponse(true, handlers.onPutAssign?.(init.body) ?? { ok: true });
+          return mockResponse(true, handlers.onGetAssign?.() ?? { assigned: ["dev-laptop"] });
+        }
+        return mockResponse(true, [
+          { id: "u1", username: "alice", role: "user", createdAt: 1700000000000 },
+          { id: "a1", username: "admin", role: "admin", createdAt: 1700000000000 },
+        ]);
+      }
+      if (url.includes("/api/admin/nodes")) {
+        return mockResponse(true, [
+          { id: "n1", nodeId: "dev-laptop", createdAt: 1700000000000 },
+          { id: "n2", nodeId: "build-server", createdAt: 1700000000000 },
+        ]);
+      }
+      return mockResponse(false);
+    });
+  }
+
+  it("admin 行无分配节点按钮，user 行有且仅一个", async () => {
+    vi.stubGlobal("fetch", assignFetchMock());
+    render(<AdminView />);
+    await waitFor(() => expect(screen.getByText("alice")).toBeTruthy());
+    expect(screen.getAllByRole("button", { name: "分配节点" })).toHaveLength(1);
+  });
+
+  it("打开弹窗 → GET 当前授权集，dev-laptop 勾选、build-server 未勾选", async () => {
+    vi.stubGlobal("fetch", assignFetchMock());
+    render(<AdminView />);
+    await waitFor(() => expect(screen.getByText("alice")).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: "分配节点" }));
+
+    await waitFor(() => expect(screen.getByText("dev-laptop")).toBeTruthy());
+    const checkboxes = screen.getAllByRole("checkbox") as HTMLInputElement[];
+    expect(checkboxes).toHaveLength(2);
+    expect(checkboxes[0].checked).toBe(true); // dev-laptop（assigned）
+    expect(checkboxes[1].checked).toBe(false); // build-server
+  });
+
+  it("勾选 build-server 后保存 → PUT { nodeIds: [dev-laptop, build-server] }，弹窗关闭+提示", async () => {
+    let savedBody: unknown = undefined;
+    const fetchMock = assignFetchMock({
+      onPutAssign: (body) => { savedBody = body; return { ok: true }; },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<AdminView />);
+    await waitFor(() => expect(screen.getByText("alice")).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: "分配节点" }));
+    await waitFor(() => expect(screen.getByText("dev-laptop")).toBeTruthy());
+
+    fireEvent.click(screen.getAllByRole("checkbox")[1]); // 勾选 build-server
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(savedBody).toBeTruthy());
+    expect(JSON.parse(savedBody as string)).toEqual({ nodeIds: ["dev-laptop", "build-server"] });
+    await waitFor(() => expect(screen.getByText(/已更新 alice 的节点分配/)).toBeTruthy());
+  });
+
+  it("取消勾选 dev-laptop 并保存 → PUT 空数组", async () => {
+    let savedBody: unknown = undefined;
+    const fetchMock = assignFetchMock({
+      onPutAssign: (body) => { savedBody = body; return { ok: true }; },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<AdminView />);
+    await waitFor(() => expect(screen.getByText("alice")).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: "分配节点" }));
+    await waitFor(() => expect(screen.getByText("dev-laptop")).toBeTruthy());
+
+    fireEvent.click(screen.getAllByRole("checkbox")[0]); // 取消 dev-laptop
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(savedBody).toBeTruthy());
+    expect(JSON.parse(savedBody as string)).toEqual({ nodeIds: [] });
+  });
+});
+
 describe("AdminView — admin Node 预注册", () => {
   // 用户列表恒空，使"删除"按钮仅来自 Node 行，避免 getByRole 歧义。
   function nodeFetchMock(handlers: { onCreate?: () => unknown; onRotate?: () => unknown; onDelete?: () => unknown } = {}) {

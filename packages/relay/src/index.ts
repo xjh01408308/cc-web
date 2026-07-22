@@ -18,9 +18,11 @@ import { randomBytes } from 'node:crypto';
 import { WebSocketServer } from 'ws';
 import { RELAY_PORT, RELAY_BROWSER_TOKEN, STATIC_DIR, INITIAL_ADMIN_USER, INITIAL_ADMIN_PASSWORD, isDevMode } from './config.js';
 import { serveStatic } from './static.js';
-import { handleBrowserConnection, handleLocalConnection, requestLocal, getOnlineNodes, isNodePasswordRequired, initRelay } from './ws-relay.js';
+import { handleBrowserConnection, handleLocalConnection, requestLocal, getOnlineNodesForUser, initRelay } from './ws-relay.js';
 import { UserStore, DEFAULT_USER_DB_PATH, type UserRole } from './user-store.js';
 import { NodeStore, DEFAULT_NODE_DB_PATH } from './node-store.js';
+import { AssignmentStore, DEFAULT_ASSIGNMENT_DB_PATH } from './assignment-store.js';
+import { canOperateNode } from './authz.js';
 import { handleAdminUsersRoute, handleAdminNodesRoute } from './admin-routes.js';
 import { jsonResponse, readBody } from './http-utils.js';
 
@@ -37,8 +39,12 @@ if (seedResult.seeded) console.log(`[relay] 已创建首个管理员账户: ${se
 // 同库不同表（nodes）。管理员在 /admin 预注册 Node 生成 (nodeId, nodeSecret)；local register 据此校验。
 const nodeStore = new NodeStore(DEFAULT_NODE_DB_PATH);
 
-// 把 nodeStore 注入连接处理单例（必须在 server.listen / 任何 WS 连接前完成）。
-initRelay(nodeStore);
+// ---- Assignment 授权表（relay 侧 user↔Node 多对多，见 ADR-0005）----
+// 同库不同表（assignments）。唯一操作授权机制：被分配的 user 可完全操作该 Node。
+const assignmentStore = new AssignmentStore(DEFAULT_ASSIGNMENT_DB_PATH);
+
+// 把 nodeStore / assignmentStore 注入连接处理单例（必须在 server.listen / 任何 WS 连接前完成）。
+initRelay(nodeStore, assignmentStore);
 
 // ---- Session Token 管理 ----
 // token → session。session 携带当前登录用户身份（userId / username / role），
@@ -120,6 +126,18 @@ function getSession(req: http.IncomingMessage): Session | null {
   return null;
 }
 
+/**
+ * 显式 nodeId 的 Assignment 访问控制（/api/projects /api/sessions 共用，见 ADR-0005）。
+ * 复用 authz.canOperateNode 集中策略；admin 短路免 DB 查询。
+ * 离线与否不在此判定（离线交由 requestLocal 报 503）。返回错误文案（拒绝）或 null（放行）。
+ * nodeId 为空时放行（由调用方 fallback 到可见节点）。
+ */
+function checkNodeAccess(session: Session, nodeId: string | undefined, store: AssignmentStore): string | null {
+  if (!nodeId || session.role === 'admin') return null;
+  const assigned = new Set(store.assignedNodeIds(session.userId));
+  return canOperateNode(session.role, nodeId, assigned) ? null : '无权访问此节点';
+}
+
 const server = http.createServer(async (req, res) => {
   // OPTIONS 预检
   if (req.method === 'OPTIONS') {
@@ -138,8 +156,8 @@ const server = http.createServer(async (req, res) => {
   // 守卫（401/403）与 CRUD 逻辑均在 admin-routes 内。各处理器返回 true 表已处理。
   if (req.url?.startsWith('/api/admin/')) {
     const session = getSession(req);
-    if (await handleAdminUsersRoute(req, res, { session, userStore })) return;
-    if (await handleAdminNodesRoute(req, res, { session, nodeStore })) return;
+    if (await handleAdminUsersRoute(req, res, { session, userStore, assignmentStore })) return;
+    if (await handleAdminNodesRoute(req, res, { session, nodeStore, assignmentStore })) return;
   }
 
   // 登录端点：用户名 + 密码查 users 表（scrypt 校验），通过后下发 httpOnly cookie。
@@ -165,30 +183,34 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 节点列表 API
+  // 节点列表 API（按登录用户过滤：admin 全部；user 仅 assigned ∩ online）
   if (req.url?.startsWith('/api/nodes') && req.method === 'GET') {
-    if (!getSession(req)) {
+    const session = getSession(req);
+    if (!session) {
       jsonResponse(res, { error: '未认证' }, 401);
       return;
     }
-    jsonResponse(res, getOnlineNodes());
+    jsonResponse(res, getOnlineNodesForUser(session.userId, session.role));
     return;
   }
 
-  // 项目列表 API
+  // 项目列表 API（Assignment 访问控制：user 只能访问被分配的节点）
   if (req.url?.startsWith('/api/projects') && req.method === 'GET') {
-    if (!getSession(req)) {
+    const session = getSession(req);
+    if (!session) {
       jsonResponse(res, { error: '未认证' }, 401);
       return;
     }
     const nodeId = getQueryParam(req, 'nodeId');
-    // 指定节点需密码 → 拦截；未指定节点但首个在线节点需密码 → 也拦截
-    const targetNodeId = nodeId || getOnlineNodes()[0]?.nodeId;
-    if (targetNodeId && isNodePasswordRequired(targetNodeId)) {
-      jsonResponse(res, { error: 'auth_required', message: '此节点需要密码认证' }, 401);
+    const gateErr = checkNodeAccess(session, nodeId, assignmentStore);
+    if (gateErr) { jsonResponse(res, { error: gateErr }, 403); return; }
+    // 未指定节点 → 取该用户可见的首个在线节点（user 为 assigned ∩ online）
+    const targetNodeId = nodeId || getOnlineNodesForUser(session.userId, session.role)[0]?.nodeId;
+    if (!targetNodeId) {
+      jsonResponse(res, { error: '没有可用的在线节点' }, 503);
       return;
     }
-    requestLocal({ type: 'list_projects' }, nodeId)
+    requestLocal({ type: 'list_projects' }, targetNodeId)
       .then((msg) => {
         const data = msg as { projects?: unknown };
         jsonResponse(res, data.projects || []);
@@ -197,21 +219,24 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 会话列表 API
+  // 会话列表 API（Assignment 访问控制：user 只能访问被分配的节点）
   if (req.url?.startsWith('/api/sessions') && req.method === 'GET') {
-    if (!getSession(req)) {
+    const session = getSession(req);
+    if (!session) {
       jsonResponse(res, { error: '未认证' }, 401);
       return;
     }
     const url = new URL(req.url, 'http://localhost');
     const projectId = url.searchParams.get('projectId') || undefined;
     const nodeId = url.searchParams.get('nodeId') || undefined;
-    const targetNodeId = nodeId || getOnlineNodes()[0]?.nodeId;
-    if (targetNodeId && isNodePasswordRequired(targetNodeId)) {
-      jsonResponse(res, { error: 'auth_required', message: '此节点需要密码认证' }, 401);
+    const gateErr = checkNodeAccess(session, nodeId, assignmentStore);
+    if (gateErr) { jsonResponse(res, { error: gateErr }, 403); return; }
+    const targetNodeId = nodeId || getOnlineNodesForUser(session.userId, session.role)[0]?.nodeId;
+    if (!targetNodeId) {
+      jsonResponse(res, { error: '没有可用的在线节点' }, 503);
       return;
     }
-    requestLocal({ type: 'list_sessions', projectId }, nodeId)
+    requestLocal({ type: 'list_sessions', projectId }, targetNodeId)
       .then((msg) => {
         const data = msg as { sessions?: unknown };
         jsonResponse(res, data.sessions || []);
@@ -261,14 +286,16 @@ server.on('upgrade', (req, socket, head) => {
   const ip = getClientIp(req);
   if (req.url?.startsWith('/ws/browser')) {
     // session 走 httpOnly cookie（浏览器在 WS 握手时自动携带同站 cookie）；getSession 统一判定
-    // （dev 模式旁路放行）。握手处即可读到当前用户身份（userId/role）。
-    if (getSession(req)) {
+    // （dev 模式旁路放行）。握手处即可读到当前用户身份（userId/role），透传给连接处理用于
+    // 按用户过滤节点列表 + Assignment 操作授权（见 ADR-0005）。
+    const session = getSession(req);
+    if (session) {
       browserWss.handleUpgrade(req, socket, head, (ws) => {
-        handleBrowserConnection(ws, ip);
+        handleBrowserConnection(ws, ip, { userId: session.userId, username: session.username, role: session.role });
       });
       return;
     }
-    // 回退到旧式 RELAY_BROWSER_TOKEN（非浏览器 / 旧式客户端，仍走 query）
+    // 回退到旧式 RELAY_BROWSER_TOKEN（非浏览器 / 旧式客户端，仍走 query）；无 session → 默认 admin 身份。
     const queryToken = new URL(req.url, 'http://localhost').searchParams.get('token');
     if (RELAY_BROWSER_TOKEN && queryToken === RELAY_BROWSER_TOKEN) {
       browserWss.handleUpgrade(req, socket, head, (ws) => {
