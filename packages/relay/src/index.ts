@@ -16,21 +16,36 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import { WebSocketServer } from 'ws';
-import { RELAY_PORT, RELAY_BROWSER_TOKEN, RELAY_PASSWORD, STATIC_DIR, isDevMode, isUsingDefaultRelayToken } from './config.js';
+import { RELAY_PORT, RELAY_BROWSER_TOKEN, STATIC_DIR, INITIAL_ADMIN_USER, INITIAL_ADMIN_PASSWORD, isDevMode, isUsingDefaultRelayToken } from './config.js';
 import { serveStatic } from './static.js';
 import { handleBrowserConnection, handleLocalConnection, requestLocal, getOnlineNodes, isNodePasswordRequired } from './ws-relay.js';
+import { UserStore, DEFAULT_USER_DB_PATH, type UserRole } from './user-store.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const staticDir = path.resolve(__dirname, STATIC_DIR);
 
+// ---- 用户表（多用户登录）+ 首 admin seed ----
+// 持久化到 packages/relay/data/cc-web.db（data/ 已 gitignore）。首启 users 表为空时幂等建首个 admin。
+const userStore = new UserStore(DEFAULT_USER_DB_PATH);
+const seedResult = userStore.seedInitialAdmin(INITIAL_ADMIN_USER, INITIAL_ADMIN_PASSWORD);
+if (seedResult.seeded) console.log(`[relay] 已创建首个管理员账户: ${seedResult.username}`);
+
 // ---- Session Token 管理 ----
-const sessionTokens = new Map<string, number>(); // token → createdAt
+// token → session。session 携带当前登录用户身份（userId / username / role），
+// HTTP 校验与 WS 握手均经 getSession 读取（issue #21 验收点）。
+interface Session {
+  userId: string;
+  username: string;
+  role: UserRole;
+  createdAt: number;
+}
+const sessionTokens = new Map<string, Session>(); // token → session
 const SESSION_TTL = 24 * 60 * 60 * 1000; // 24 小时
 
 setInterval(() => {
   const now = Date.now();
-  for (const [token, created] of sessionTokens) {
-    if (now - created > SESSION_TTL) sessionTokens.delete(token);
+  for (const [token, session] of sessionTokens) {
+    if (now - session.createdAt > SESSION_TTL) sessionTokens.delete(token);
   }
 }, 5 * 60 * 1000);
 
@@ -98,15 +113,22 @@ function clearSessionCookie(res: http.ServerResponse, req: http.IncomingMessage)
   res.setHeader('Set-Cookie', parts.join('; '));
 }
 
-function validateSessionToken(req: http.IncomingMessage): boolean {
-  if (isDevMode() && !RELAY_PASSWORD) return true;
+function getSession(req: http.IncomingMessage): Session | null {
+  // dev 模式放行（本地开发免登录）：返回 synthetic admin 身份，HTTP/WS 均据此识别为已登录。
+  if (isDevMode()) return { userId: 'dev', username: 'dev', role: 'admin', createdAt: Date.now() };
   // 优先 httpOnly cookie（浏览器路径，token 不暴露给 JS）
   const cookieToken = readSessionCookie(req);
-  if (cookieToken && sessionTokens.has(cookieToken)) return true;
+  if (cookieToken) {
+    const s = sessionTokens.get(cookieToken);
+    if (s) return s;
+  }
   // 兼容 Authorization Bearer（非浏览器客户端）
   const auth = req.headers['authorization'];
-  if (auth?.startsWith('Bearer ') && sessionTokens.has(auth.slice(7))) return true;
-  return false;
+  if (auth?.startsWith('Bearer ')) {
+    const s = sessionTokens.get(auth.slice(7));
+    if (s) return s;
+  }
+  return null;
 }
 
 const server = http.createServer(async (req, res) => {
@@ -123,18 +145,22 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 登录端点：校验通过后下发 httpOnly cookie，token 不再回传给 JS
+  // 登录端点：用户名 + 密码查 users 表（scrypt 校验），通过后下发 httpOnly cookie。
+  // dev 模式下 getSession 旁路放行，但本端点仍走真实查表，保证登录链路始终被覆盖。
   if (req.url?.startsWith('/api/login') && req.method === 'POST') {
     try {
       const body = await readBody(req);
-      const { password } = JSON.parse(body || '{}');
-      if (password === RELAY_PASSWORD || (!RELAY_PASSWORD && isDevMode())) {
+      const parsed = JSON.parse(body || '{}') as { username?: unknown; password?: unknown };
+      const username = typeof parsed.username === 'string' ? parsed.username : '';
+      const password = typeof parsed.password === 'string' ? parsed.password : '';
+      const user = userStore.authenticate(username, password);
+      if (user) {
         const token = randomBytes(32).toString('hex');
-        sessionTokens.set(token, Date.now());
+        sessionTokens.set(token, { userId: user.id, username: user.username, role: user.role, createdAt: Date.now() });
         setSessionCookie(res, token, req);
         jsonResponse(res, { ok: true });
       } else {
-        jsonResponse(res, { error: RELAY_PASSWORD ? '密码错误' : '未配置访问密码' }, 401);
+        jsonResponse(res, { error: '用户名或密码错误' }, 401);
       }
     } catch {
       jsonResponse(res, { error: '请求格式错误' }, 400);
@@ -144,7 +170,7 @@ const server = http.createServer(async (req, res) => {
 
   // 节点列表 API
   if (req.url?.startsWith('/api/nodes') && req.method === 'GET') {
-    if (!validateSessionToken(req)) {
+    if (!getSession(req)) {
       jsonResponse(res, { error: '未认证' }, 401);
       return;
     }
@@ -154,7 +180,7 @@ const server = http.createServer(async (req, res) => {
 
   // 项目列表 API
   if (req.url?.startsWith('/api/projects') && req.method === 'GET') {
-    if (!validateSessionToken(req)) {
+    if (!getSession(req)) {
       jsonResponse(res, { error: '未认证' }, 401);
       return;
     }
@@ -176,7 +202,7 @@ const server = http.createServer(async (req, res) => {
 
   // 会话列表 API
   if (req.url?.startsWith('/api/sessions') && req.method === 'GET') {
-    if (!validateSessionToken(req)) {
+    if (!getSession(req)) {
       jsonResponse(res, { error: '未认证' }, 401);
       return;
     }
@@ -206,13 +232,15 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 会话探测：前端据此判断 httpOnly cookie 是否仍有效（cookie 不可被 JS 读取）
+  // 会话探测：前端据此判断 httpOnly cookie 是否仍有效（cookie 不可被 JS 读取）。
+  // 同时回传当前登录用户身份（HTTP 校验可读到 userId/role，见 issue #21 验收点）。
   if (req.url?.startsWith('/api/session') && req.method === 'GET') {
-    if (!validateSessionToken(req)) {
+    const session = getSession(req);
+    if (!session) {
       jsonResponse(res, { error: '未认证' }, 401);
       return;
     }
-    jsonResponse(res, { ok: true });
+    jsonResponse(res, { ok: true, user: { username: session.username, role: session.role } });
     return;
   }
 
@@ -235,9 +263,9 @@ function getClientIp(req: http.IncomingMessage): string {
 server.on('upgrade', (req, socket, head) => {
   const ip = getClientIp(req);
   if (req.url?.startsWith('/ws/browser')) {
-    // session token 走 httpOnly cookie（浏览器在 WS 握手时自动携带同站 cookie），不再放 URL
-    const cookieToken = readSessionCookie(req);
-    if (cookieToken && sessionTokens.has(cookieToken)) {
+    // session 走 httpOnly cookie（浏览器在 WS 握手时自动携带同站 cookie）；getSession 统一判定
+    // （dev 模式旁路放行）。握手处即可读到当前用户身份（userId/role）。
+    if (getSession(req)) {
       browserWss.handleUpgrade(req, socket, head, (ws) => {
         handleBrowserConnection(ws, ip);
       });
@@ -246,13 +274,6 @@ server.on('upgrade', (req, socket, head) => {
     // 回退到旧式 RELAY_BROWSER_TOKEN（非浏览器 / 旧式客户端，仍走 query）
     const queryToken = new URL(req.url, 'http://localhost').searchParams.get('token');
     if (RELAY_BROWSER_TOKEN && queryToken === RELAY_BROWSER_TOKEN) {
-      browserWss.handleUpgrade(req, socket, head, (ws) => {
-        handleBrowserConnection(ws, ip);
-      });
-      return;
-    }
-    // 开发模式且无 RELAY_PASSWORD → 放行
-    if (isDevMode() && !RELAY_PASSWORD) {
       browserWss.handleUpgrade(req, socket, head, (ws) => {
         handleBrowserConnection(ws, ip);
       });
@@ -292,9 +313,7 @@ server.listen(RELAY_PORT, '127.0.0.1', () => {
   if (isDevMode()) {
     console.warn('════════════════════════════════════════════════════════');
     console.warn('  [DEV MODE] 开发模式 (NODE_ENV != "production")');
-    if (!RELAY_PASSWORD) {
-      console.warn('  [INSECURE] RELAY_PASSWORD 为空 — 浏览器登录无需密码');
-    }
+    console.warn('  [DEV MODE] 浏览器登录已旁路（synthetic admin 身份）');
     if (isUsingDefaultRelayToken()) {
       console.warn('  [INSECURE] RELAY_TOKEN 使用默认值 "dev-token" — 节点注册不安全');
     }

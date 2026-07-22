@@ -49,6 +49,8 @@ export function ChatView() {
   const {
     authed,
     clearSession,
+    loginUsername,
+    setLoginUsername,
     loginPassword,
     setLoginPassword,
     loginError,
@@ -618,17 +620,27 @@ export function ChatView() {
         <div className="w-full max-w-sm p-8">
           <div className="mb-6 text-center">
             <h1 className="text-2xl font-bold text-slate-800 dark:text-slate-100">cc-web</h1>
-            <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">请输入访问密码</p>
+            <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">请输入用户名和密码</p>
           </div>
           <div className="space-y-4">
+            <input
+              type="text"
+              value={loginUsername}
+              onChange={(e) => setLoginUsername(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleLogin()}
+              placeholder="用户名"
+              className="w-full rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm text-slate-800 placeholder-slate-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 dark:placeholder-slate-500 dark:focus:border-blue-400 dark:focus:ring-blue-400"
+              autoFocus
+              autoComplete="username"
+            />
             <input
               type="password"
               value={loginPassword}
               onChange={(e) => setLoginPassword(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && handleLogin()}
-              placeholder="访问密码"
+              placeholder="密码"
               className="w-full rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm text-slate-800 placeholder-slate-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 dark:placeholder-slate-500 dark:focus:border-blue-400 dark:focus:ring-blue-400"
-              autoFocus
+              autoComplete="current-password"
             />
             {loginError && (
               <p className="text-sm text-red-500">{loginError}</p>
