@@ -3,10 +3,32 @@ import { randomUUID } from 'node:crypto';
 import type { BrowserCommand, LocalEvent, LocalControl } from './types.js';
 import { BrowserCommandType, LocalCommandType, LocalEventType, BrowserEventType, LocalControlType } from './types.js';
 import { ConnStates } from './conn-state.js';
-import { NodeRegistry, type NodeConn } from './node-registry.js';
+import { NodeRegistry, type NodeConn, type NodeSummary } from './node-registry.js';
 import { SessionRouter } from './session-router.js';
 import { RequestMatcher } from './request-matcher.js';
 import { NodeStore } from './node-store.js';
+import { AssignmentStore } from './assignment-store.js';
+import { filterVisibleNodes, canOperateNode } from './authz.js';
+import type { UserRole } from './user-store.js';
+
+/** browser WS 连接携带的登录用户身份（index.ts 在 WS 握手处从 session 读出后注入）。 */
+export interface BrowserSession {
+  userId: string;
+  username: string;
+  role: UserRole;
+}
+
+/**
+ * 未显式传 session 时的默认身份：synthetic admin（全访问）。
+ * 生产路径 index.ts 总是传真实 session；此默认仅用于：
+ *   - 旧式 RELAY_BROWSER_TOKEN 回退（非浏览器客户端，无 session）
+ *   - 连接处理层单测（不关心授权、只验路由的用例）
+ * 默认为 admin 与改造前行为一致（见 all nodes / 全放行）。
+ */
+const ANONYMOUS_ADMIN: BrowserSession = { userId: '', username: '', role: 'admin' };
+
+/** admin 调用 filterVisibleNodes 时传入的占位空集（admin 分支不读它，省一次 DB 查询）。 */
+const EMPTY_NODE_SET = new Set<string>();
 
 // 认证速率限制（browser 连接特有；属连接处理职责，未收进 4 个 domain module）
 const MAX_AUTH_FAILURES = 5;
@@ -35,6 +57,7 @@ const BROWSER_REQUEST_TIMEOUT_MS = 10000;
  */
 export class ConnectionHandler {
   private readonly nodeStore: NodeStore;
+  private readonly assignmentStore: AssignmentStore;
   private readonly states = new ConnStates();
   private readonly nodes = new NodeRegistry();
   private readonly router = new SessionRouter(
@@ -45,11 +68,13 @@ export class ConnectionHandler {
   private readonly authAttempts = new Map<WebSocket, { failures: number; lastAttempt: number }>();
 
   /**
-   * nodeStore 用于 local 注册时校验预注册凭证（nodeId + nodeSecret，见 ADR-0004）。
+   * nodeStore 用于 local 注册时校验预注册凭证（nodeId + nodeSecret，见 ADR-0004）；
+   * assignmentStore 用于操作授权判定（Assignment，见 ADR-0005）与按用户过滤节点列表。
    * 注入而非模块内创建，便于 index.ts 作组合根、单测传临时 store。
    */
-  constructor(nodeStore: NodeStore) {
+  constructor(nodeStore: NodeStore, assignmentStore: AssignmentStore) {
     this.nodeStore = nodeStore;
+    this.assignmentStore = assignmentStore;
   }
 
   // ---- 传输原语 ----
@@ -65,15 +90,38 @@ export class ConnectionHandler {
   }
 
   private broadcastNodesList(): void {
-    this.router.broadcastToAll({ type: BrowserEventType.NodesList, nodes: this.nodes.listNodes() });
+    // 每 browser 一份按其用户过滤后的节点列表（admin 全部；user 仅 assigned ∩ online）。
+    this.router.broadcastPerBrowser((ws) => ({ type: BrowserEventType.NodesList, nodes: this.visibleNodesFor(ws) }));
+  }
+
+  /** 某 browser 可见的在线节点：解析其身份后委托 getOnlineNodesForUser（admin 全部；user assigned ∩ online）。 */
+  private visibleNodesFor(ws: WebSocket): NodeSummary[] {
+    const st = this.states.get(ws);
+    return this.getOnlineNodesForUser(st?.userId ?? '', st?.role ?? 'admin');
+  }
+
+  private sendNodesListTo(ws: WebSocket): void {
+    this.send(ws, { type: BrowserEventType.NodesList, nodes: this.visibleNodesFor(ws) });
   }
 
   /**
-   * 类 A（按 msg.nodeId / 自动选择）目标解析 + 认证一体收口，消除 8 处重复。
+   * 操作授权判定（Assignment，见 ADR-0005）：admin → 恒 true；user → 须被分配该 node。
+   * 替代已废弃的 NodeAuth isAuthenticated（密码第二因素）；isAuthenticated/markAuthenticated/
+   * sendAuthRequired/auth_node 协议族在此切片后成为死路径，由 T6 清理。
+   */
+  private canWsOperate(ws: WebSocket, nodeId: string): boolean {
+    const st = this.states.get(ws);
+    const role = st?.role ?? 'admin';
+    if (role === 'admin') return true;
+    return canOperateNode(role, nodeId, new Set(this.assignmentStore.assignedNodeIds(st?.userId ?? '')));
+  }
+
+  /**
+   * 类 A（按 msg.nodeId / 自动选择）目标解析 + 授权一体收口，消除 8 处重复。
    * 文案差异来自原代码的分支不一致，用 opts 精确复刻：
    *   - noSelectionError 提供 → no-selection 回该 error（Chat「未选择节点，请先选择节点」、其余「未选择节点」）；省略则静默
    *   - offlineError=true → offline 回「节点 X 已离线」（仅 Chat/CreateSession）；省略则静默（ListSessions 等的原 quirk）
-   * 命中且已认证返回 conn；否则已自行回复错误并返回 null（调用方 return）。
+   * 命中且已授权返回 conn；否则已自行回复错误并返回 null（调用方 return）。
    */
   private resolveAuthedTarget(
     ws: WebSocket,
@@ -89,8 +137,8 @@ export class ConnectionHandler {
       }
       return null;
     }
-    if (!this.nodes.isAuthenticated(ws, r.nodeId)) {
-      this.sendAuthRequired(ws, r.nodeId);
+    if (!this.canWsOperate(ws, r.nodeId)) {
+      this.send(ws, { type: BrowserEventType.Error, error: `无权访问节点 ${r.nodeId}` });
       return null;
     }
     return r.conn;
@@ -116,7 +164,8 @@ export class ConnectionHandler {
     switch (msg.type) {
       case BrowserCommandType.SelectNode: {
         const nodeId = msg.nodeId;
-        if (!nodeId || !this.nodes.has(nodeId)) {
+        // 不在线 或 未授权（未分配）→ 同样回「不在线」，避免成为节点存在性探测口（未分配完全不可见）。
+        if (!nodeId || !this.nodes.has(nodeId) || !this.canWsOperate(ws, nodeId)) {
           this.send(ws, { type: BrowserEventType.Error, error: `节点 ${nodeId} 不在线` });
           return;
         }
@@ -126,7 +175,7 @@ export class ConnectionHandler {
       }
 
       case BrowserCommandType.ListNodes: {
-        this.send(ws, { type: BrowserEventType.NodesList, nodes: this.nodes.listNodes() });
+        this.sendNodesListTo(ws);
         return;
       }
 
@@ -151,8 +200,8 @@ export class ConnectionHandler {
       case BrowserCommandType.StopSession: {
         const conn = this.resolveForSession(ws, msg.sessionId);
         if (conn) {
-          if (!this.nodes.isAuthenticated(ws, conn.nodeId)) {
-            this.sendAuthRequired(ws, conn.nodeId);
+          if (!this.canWsOperate(ws, conn.nodeId)) {
+            this.send(ws, { type: BrowserEventType.Error, error: `无权访问节点 ${conn.nodeId}` });
             return;
           }
           this.send(conn.ws, { type: LocalCommandType.StopSession, sessionId: msg.sessionId });
@@ -163,8 +212,8 @@ export class ConnectionHandler {
       case BrowserCommandType.DeleteSession: {
         const conn = this.resolveForSession(ws, msg.sessionId);
         if (conn) {
-          if (!this.nodes.isAuthenticated(ws, conn.nodeId)) {
-            this.sendAuthRequired(ws, conn.nodeId);
+          if (!this.canWsOperate(ws, conn.nodeId)) {
+            this.send(ws, { type: BrowserEventType.Error, error: `无权访问节点 ${conn.nodeId}` });
             return;
           }
           this.send(conn.ws, { type: LocalCommandType.DeleteSession, sessionId: msg.sessionId });
@@ -267,8 +316,8 @@ export class ConnectionHandler {
       case BrowserCommandType.ChangePermissionMode: {
         const conn = this.resolveForSession(ws, msg.sessionId);
         if (conn) {
-          if (!this.nodes.isAuthenticated(ws, conn.nodeId)) {
-            this.sendAuthRequired(ws, conn.nodeId);
+          if (!this.canWsOperate(ws, conn.nodeId)) {
+            this.send(ws, { type: BrowserEventType.Error, error: `无权访问节点 ${conn.nodeId}` });
             return;
           }
           this.send(conn.ws, { type: LocalCommandType.ChangePermissionMode, sessionId: msg.sessionId, permissionMode: msg.permissionMode });
@@ -279,8 +328,8 @@ export class ConnectionHandler {
       case BrowserCommandType.RetryWithPermission: {
         const conn = this.resolveForSession(ws, msg.sessionId);
         if (conn) {
-          if (!this.nodes.isAuthenticated(ws, conn.nodeId)) {
-            this.sendAuthRequired(ws, conn.nodeId);
+          if (!this.canWsOperate(ws, conn.nodeId)) {
+            this.send(ws, { type: BrowserEventType.Error, error: `无权访问节点 ${conn.nodeId}` });
             return;
           }
           this.send(conn.ws, { type: LocalCommandType.RetryWithPermission, sessionId: msg.sessionId, permissionMode: msg.permissionMode });
@@ -345,8 +394,10 @@ export class ConnectionHandler {
     });
   }
 
-  getOnlineNodes(): Array<{ nodeId: string; sessionCount: number; passwordRequired: boolean; workspaceRoot?: string }> {
-    return this.nodes.listNodes();
+  /** HTTP /api/nodes 用：按登录用户过滤的在线节点（admin 全部；user assigned ∩ online）。 */
+  getOnlineNodesForUser(userId: string, role: UserRole): NodeSummary[] {
+    const assigned = role === 'admin' ? EMPTY_NODE_SET : new Set(this.assignmentStore.assignedNodeIds(userId));
+    return filterVisibleNodes(this.nodes.listNodes(), role, assigned);
   }
 
   isNodePasswordRequired(nodeId: string): boolean {
@@ -466,16 +517,17 @@ export class ConnectionHandler {
 
   // ---- 连接管理 ----
 
-  handleBrowserConnection(ws: WebSocket, ip: string): void {
+  handleBrowserConnection(ws: WebSocket, ip: string, session: BrowserSession = ANONYMOUS_ADMIN): void {
     this.states.init(ws, ip);
+    this.states.setBrowserUser(ws, session.userId, session.role);
     this.router.addBrowser(ws);
     this.nodes.forgetBrowser(ws); // 清掉可能残留的选中/认证态（原 browserNodeMap.delete(ws)）
-    console.log(`[relay] 浏览器已连接 | IP: ${ip} | 在线: ${this.router.size}`);
+    console.log(`[relay] 浏览器已连接 | IP: ${ip} | user: ${session.username || '(匿名)'} | 在线: ${this.router.size}`);
 
-    // 通知当前节点列表
-    const online = this.nodes.listNodes();
-    if (online.length > 0) {
-      this.send(ws, { type: BrowserEventType.NodesList, nodes: online });
+    // 通知当前节点列表（按该用户过滤：admin 全部；user 仅 assigned ∩ online）
+    const visible = this.visibleNodesFor(ws);
+    if (visible.length > 0) {
+      this.send(ws, { type: BrowserEventType.NodesList, nodes: visible });
     }
 
     ws.on('message', (raw) => {
@@ -577,12 +629,12 @@ export class ConnectionHandler {
 
 let relay: ConnectionHandler | undefined;
 
-export function initRelay(nodeStore: NodeStore): void {
-  relay = new ConnectionHandler(nodeStore);
+export function initRelay(nodeStore: NodeStore, assignmentStore: AssignmentStore): void {
+  relay = new ConnectionHandler(nodeStore, assignmentStore);
 }
 
-export function handleBrowserConnection(ws: WebSocket, ip: string): void {
-  relay!.handleBrowserConnection(ws, ip);
+export function handleBrowserConnection(ws: WebSocket, ip: string, session?: BrowserSession): void {
+  relay!.handleBrowserConnection(ws, ip, session);
 }
 
 export function handleLocalConnection(ws: WebSocket, ip: string): void {
@@ -593,8 +645,8 @@ export function requestLocal(data: Record<string, unknown>, nodeId?: string): Pr
   return relay!.requestLocal(data, nodeId);
 }
 
-export function getOnlineNodes(): Array<{ nodeId: string; sessionCount: number; passwordRequired: boolean; workspaceRoot?: string }> {
-  return relay!.getOnlineNodes();
+export function getOnlineNodesForUser(userId: string, role: UserRole): NodeSummary[] {
+  return relay!.getOnlineNodesForUser(userId, role);
 }
 
 export function isNodePasswordRequired(nodeId: string): boolean {

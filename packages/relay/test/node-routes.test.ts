@@ -6,6 +6,7 @@ import os from 'node:os';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { handleAdminNodesRoute, type AdminSession } from '../src/admin-routes.js';
 import { NodeStore } from '../src/node-store.js';
+import { AssignmentStore } from '../src/assignment-store.js';
 
 // 每例独立临时 db（与 node-store.test 同构）。
 function tmpStore(): { store: NodeStore; cleanup: () => void } {
@@ -18,12 +19,28 @@ function tmpStore(): { store: NodeStore; cleanup: () => void } {
   return { store, cleanup };
 }
 
-let cleanup: (() => void) | undefined;
-afterEach(() => { cleanup?.(); cleanup = undefined; });
+function tmpAssignmentStore(): { store: AssignmentStore; cleanup: () => void } {
+  const dbPath = path.join(os.tmpdir(), `cc-web-node-route-assign-${randomUUID()}.db`);
+  const store = new AssignmentStore(dbPath);
+  const cleanup = (): void => {
+    store.close();
+    for (const suffix of ['', '-wal', '-shm']) fs.rmSync(dbPath + suffix, { force: true });
+  };
+  return { store, cleanup };
+}
+
+const cleanups: Array<() => void> = [];
+afterEach(() => { while (cleanups.length) cleanups.pop()!(); });
 
 function makeStore(): NodeStore {
   const t = tmpStore();
-  cleanup = t.cleanup;
+  cleanups.push(t.cleanup);
+  return t.store;
+}
+
+function makeAssignments(): AssignmentStore {
+  const t = tmpAssignmentStore();
+  cleanups.push(t.cleanup);
   return t.store;
 }
 
@@ -61,9 +78,10 @@ function mockRes(): { res: ServerResponse; status: () => number; json: () => unk
   };
 }
 
-async function call(method: string, url: string, opts: { session: AdminSession | null; body?: unknown; store: NodeStore }): Promise<{ handled: boolean; status: number; json: unknown }> {
+async function call(method: string, url: string, opts: { session: AdminSession | null; body?: unknown; store: NodeStore; assignments?: AssignmentStore }): Promise<{ handled: boolean; status: number; json: unknown }> {
   const m = mockRes();
-  const handled = await handleAdminNodesRoute(mockReq(method, url, opts.body), m.res, { session: opts.session, nodeStore: opts.store });
+  const assignmentStore = opts.assignments ?? makeAssignments();
+  const handled = await handleAdminNodesRoute(mockReq(method, url, opts.body), m.res, { session: opts.session, nodeStore: opts.store, assignmentStore });
   return { handled, status: m.status(), json: m.json() };
 }
 
@@ -191,5 +209,20 @@ describe('admin node-routes — DELETE 删除', () => {
     const r = await call('DELETE', `/api/admin/nodes/${created.node.id}`, { session: userSession, store });
     expect(r.status).toBe(403);
     expect(store.countNodes()).toBe(1);
+  });
+});
+
+describe('admin node-routes — 删除 Node 级联清理 Assignment', () => {
+  it('删除 Node → 指向它的 Assignment 一并清除', async () => {
+    const store = makeStore();
+    const assignments = makeAssignments();
+    const created = store.createNode('n1');
+    assignments.assign('u1', 'n1');
+    assignments.assign('u2', 'n1');
+    assignments.assign('u1', 'n2'); // 不应被清
+    const r = await call('DELETE', `/api/admin/nodes/${created.node.id}`, { session: adminSession, store, assignments });
+    expect(r.status).toBe(200);
+    expect(assignments.assignedNodeIds('u1')).toEqual(['n2']);
+    expect(assignments.assignedNodeIds('u2')).toEqual([]);
   });
 });

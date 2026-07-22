@@ -1,4 +1,5 @@
 import type { WebSocket } from 'ws';
+import type { UserRole } from './user-store.js';
 
 // relay 给每条 ws 连接附加的内部状态。
 // 原实现把这些字段以 (ws as unknown)._xxx 形式散挂 15+ 处，这里收拢为 typed WeakMap：
@@ -9,6 +10,9 @@ export interface ConnState {
   lastSeen: number;     // 最近一次收到该 ws 消息的时间（local 链路假死检测用）
   nodeId?: string;       // local 连接 register 后写；undefined 表示尚未注册
   sessionId?: string;    // browser 订阅会话后写
+  /** browser 连接的登录用户身份（WS 握手从 session 带入；节点列表过滤 / 操作授权用）。local 连接不设。 */
+  userId?: string;
+  role?: UserRole;
 }
 
 export class ConnStates {
@@ -36,6 +40,12 @@ export class ConnStates {
   setSessionId(ws: WebSocket, sessionId: string): void {
     const s = this.m.get(ws);
     if (s) s.sessionId = sessionId;
+  }
+
+  /** browser 连接握手后写入登录用户身份（节点列表过滤 / 操作授权据此判定）。 */
+  setBrowserUser(ws: WebSocket, userId: string, role: UserRole): void {
+    const s = this.m.get(ws);
+    if (s) { s.userId = userId; s.role = role; }
   }
 
   getSessionId(ws: WebSocket): string | undefined {

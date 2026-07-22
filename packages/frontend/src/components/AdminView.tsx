@@ -47,6 +47,12 @@ export function AdminView() {
   const [revealedSecret, setRevealedSecret] = useState<{ nodeId: string; secret: string } | null>(null);
   const [secretCopied, setSecretCopied] = useState(false);
 
+  // 分配节点（issue #24）：以 user 为中心勾选可访问的 Node（多对多 Assignment）
+  const [assignTarget, setAssignTarget] = useState<AdminUser | null>(null);
+  const [assignChecked, setAssignChecked] = useState<Set<string>>(new Set());
+  const [assignLoading, setAssignLoading] = useState(false);
+  const [assignSaving, setAssignSaving] = useState(false);
+
   const listLoaded = useRef(false);
 
   const loadUsers = useCallback(async () => {
@@ -250,6 +256,63 @@ export function AdminView() {
     }
   }, []);
 
+  // 打开分配弹窗：先拉取该 user 当前授权集，据此初始化勾选态
+  const handleOpenAssign = useCallback(async (u: AdminUser) => {
+    setAssignTarget(u);
+    setAssignChecked(new Set());
+    setAssignLoading(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const r = await authFetch(`/api/admin/users/${u.id}/nodes`);
+      const data = await r.json();
+      if (!r.ok) {
+        setError((data as { error?: string }).error || "加载分配失败");
+        return;
+      }
+      setAssignChecked(new Set((data as { assigned: string[] }).assigned));
+    } catch {
+      setError("网络错误");
+    } finally {
+      setAssignLoading(false);
+    }
+  }, [authFetch]);
+
+  const handleToggleAssign = useCallback((nodeId: string) => {
+    setAssignChecked((prev) => {
+      const next = new Set(prev);
+      if (next.has(nodeId)) next.delete(nodeId);
+      else next.add(nodeId);
+      return next;
+    });
+  }, []);
+
+  // 保存：PUT 全量替换该 user 的授权集（增删一体）
+  const handleSaveAssign = useCallback(async () => {
+    if (!assignTarget) return;
+    setAssignSaving(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const r = await authFetch(`/api/admin/users/${assignTarget.id}/nodes`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ nodeIds: [...assignChecked] }),
+      });
+      const data = await r.json();
+      if (!r.ok) {
+        setError((data as { error?: string }).error || "保存失败");
+        return;
+      }
+      setNotice(`已更新 ${assignTarget.username} 的节点分配`);
+      setAssignTarget(null);
+    } catch {
+      setError("网络错误");
+    } finally {
+      setAssignSaving(false);
+    }
+  }, [assignTarget, assignChecked, authFetch]);
+
   // 守卫：未登录 → 回首页登录（放 effect 里执行跳转，避免渲染期副作用 / StrictMode 重复触发）
   useEffect(() => {
     if (sessionChecked && !authed) window.location.href = "/";
@@ -363,6 +426,12 @@ export function AdminView() {
                     <td className="px-4 py-2 text-right whitespace-nowrap">
                       {u.role === "user" ? (
                         <div className="flex justify-end gap-2">
+                          <button
+                            onClick={() => handleOpenAssign(u)}
+                            className="text-xs px-2 py-1 rounded border border-slate-300 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700"
+                          >
+                            分配节点
+                          </button>
                           <button
                             onClick={() => { setResetTarget(u); setResetPassword(""); setError(null); }}
                             className="text-xs px-2 py-1 rounded border border-slate-300 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700"
@@ -519,6 +588,52 @@ export function AdminView() {
                 className="text-sm px-3 py-1.5 rounded bg-blue-600 text-white hover:bg-blue-700 dark:bg-blue-500 dark:hover:bg-blue-600"
               >
                 我已保存
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 分配节点（issue #24）：勾选 user 可访问的 Node */}
+      {assignTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-md bg-white dark:bg-slate-800 rounded-lg shadow-xl p-5">
+            <h3 className="text-sm font-medium text-slate-700 dark:text-slate-200 mb-1">分配节点</h3>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mb-3">
+              勾选 {assignTarget.username} 可访问的 Node（被分配的在线 Node 才对其可见、可操作）
+            </p>
+            {assignLoading ? (
+              <p className="text-sm text-slate-500 dark:text-slate-400 py-4 text-center">加载中…</p>
+            ) : nodes.length === 0 ? (
+              <p className="text-sm text-slate-500 dark:text-slate-400 py-4 text-center">暂无预注册节点</p>
+            ) : (
+              <div className="max-h-72 overflow-auto mb-4 space-y-1">
+                {nodes.map((n) => (
+                  <label key={n.id} className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-slate-50 dark:hover:bg-slate-900/40 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={assignChecked.has(n.nodeId)}
+                      onChange={() => handleToggleAssign(n.nodeId)}
+                      className="rounded border-slate-300 dark:border-slate-600"
+                    />
+                    <span className="text-sm text-slate-800 dark:text-slate-100 font-mono text-xs">{n.nodeId}</span>
+                  </label>
+                ))}
+              </div>
+            )}
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setAssignTarget(null)}
+                className="text-sm px-3 py-1.5 rounded border border-slate-300 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700"
+              >
+                取消
+              </button>
+              <button
+                onClick={handleSaveAssign}
+                disabled={assignSaving || assignLoading}
+                className="text-sm px-3 py-1.5 rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 dark:bg-blue-500 dark:hover:bg-blue-600"
+              >
+                {assignSaving ? "保存中…" : "保存"}
               </button>
             </div>
           </div>

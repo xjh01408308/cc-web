@@ -54,6 +54,11 @@ export class SessionRouter {
     for (const ws of this.browsers) this.send(ws, data);
   }
 
+  /** 逐 browser 发送由 build(ws) 计算的载荷（节点列表按用户过滤时用：每 browser 一份）。 */
+  broadcastPerBrowser(build: (ws: WebSocket) => unknown): void {
+    for (const ws of this.browsers) this.send(ws, build(ws));
+  }
+
   // 原逻辑：未选中节点（!selectedNode）或选中了本节点（=== nodeId）的 browser 都收到
   broadcastToNodeBrowsers(nodeId: string, data: unknown): void {
     for (const ws of this.browsers) {

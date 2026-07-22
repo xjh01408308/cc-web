@@ -4,8 +4,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import type { WebSocket } from 'ws';
-import { ConnectionHandler } from '../src/ws-relay.js';
+import { ConnectionHandler, type BrowserSession } from '../src/ws-relay.js';
 import { NodeStore } from '../src/node-store.js';
+import { AssignmentStore } from '../src/assignment-store.js';
 import {
   BrowserCommandType,
   BrowserEventType,
@@ -50,24 +51,18 @@ function sendMsg(m: MockWs, msg: Record<string, unknown>): void {
   m.emit('message', Buffer.from(JSON.stringify(msg)));
 }
 
-// 每例独立临时 db（与 node-store.test 同构）：预注册 Node 凭证用。
-function tmpStore(): { store: NodeStore; cleanup: () => void } {
+// 每例独立临时 db（与 node-store.test 同构）：nodeStore + assignmentStore 共享同库不同表。
+let storeCleanup: (() => void) | undefined;
+function makeHandler(): { handler: ConnectionHandler; store: NodeStore; assignments: AssignmentStore } {
   const dbPath = path.join(os.tmpdir(), `cc-web-relay-test-${randomUUID()}.db`);
   const store = new NodeStore(dbPath);
-  const cleanup = (): void => {
+  const assignments = new AssignmentStore(dbPath);
+  storeCleanup = (): void => {
     store.close();
+    assignments.close();
     for (const suffix of ['', '-wal', '-shm']) fs.rmSync(dbPath + suffix, { force: true });
   };
-  return { store, cleanup };
-}
-
-let storeCleanup: (() => void) | undefined;
-
-// 每例建一个 handler + 配套临时 nodeStore（注册校验依赖预注册凭证）。
-function makeHandler(): { handler: ConnectionHandler; store: NodeStore } {
-  const t = tmpStore();
-  storeCleanup = t.cleanup;
-  return { handler: new ConnectionHandler(t.store), store: t.store };
+  return { handler: new ConnectionHandler(store, assignments), store, assignments };
 }
 
 // 注册一个 local 节点：先在 nodeStore 预注册拿到明文 secret，再用它 register。
@@ -151,13 +146,14 @@ describe('ConnectionHandler', () => {
       expect(browser.sent).toContainEqual({ type: BrowserEventType.Error, error: '节点 gone 已离线' });
     });
 
-    it('节点需密码 + browser 未认证 → AuthRequired，local 不收到 chat', () => {
+    it('节点需密码 + admin browser → 直接转发 chat（Assignment 模型不再弹密码）', () => {
       const { handler: h, store } = makeHandler();
       const local = mockWs(); h.handleLocalConnection(local.ws, 'ip'); registerNode(store, local, 'n1', { passwordRequired: true });
-      const browser = mockWs(); h.handleBrowserConnection(browser.ws, 'ip');
+      const browser = mockWs(); h.handleBrowserConnection(browser.ws, 'ip'); // 默认 admin session
       sendMsg(browser, { type: BrowserCommandType.Chat, sessionId: 's1', text: 'hi' });
-      expect(browser.sent).toContainEqual(expect.objectContaining({ type: BrowserEventType.AuthRequired, nodeId: 'n1' }));
-      expect(local.sent.find((m) => (m as { type?: string }).type === 'chat')).toBeUndefined();
+      // admin 全放行：不再 AuthRequired，chat 直接到 local
+      expect(browser.sent.find((m) => (m as { type?: string }).type === 'auth_required')).toBeUndefined();
+      expect(local.sent.find((m) => (m as { type?: string }).type === 'chat')).toBeTruthy();
     });
   });
 
@@ -282,6 +278,146 @@ describe('ConnectionHandler', () => {
       sendMsg(local, { type: LocalEventType.Pong });
       vi.advanceTimersByTime(30000);
       expect(local.closed).toBe(false);
+    });
+  });
+
+  describe('按 user 过滤节点列表（Assignment）', () => {
+    const userSession: BrowserSession = { userId: 'u1', username: 'alice', role: 'user' };
+    const adminSession: BrowserSession = { userId: 'a1', username: 'admin', role: 'admin' };
+
+    function nodesListEv(sent: unknown[]): { nodeId: string }[] | undefined {
+      const ev = sent.find((m) => (m as { type?: string }).type === BrowserEventType.NodesList) as { nodes: { nodeId: string }[] } | undefined;
+      return ev?.nodes;
+    }
+
+    it('user 连接：只见 assigned ∩ online 的节点（未分配不可见）', () => {
+      const { handler: h, store, assignments } = makeHandler();
+      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip');
+      registerNode(store, local, 'n1'); registerNode(store, local, 'n2');
+      assignments.assign('u1', 'n1'); // 仅分配 n1
+      const browser = mockWs(); h.handleBrowserConnection(browser.ws, 'ip', userSession);
+      expect(nodesListEv(browser.sent)?.map((n) => n.nodeId)).toEqual(['n1']);
+    });
+
+    it('user 无任何 assignment → 连接时不发 nodes_list', () => {
+      const { handler: h, store } = makeHandler();
+      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip'); registerNode(store, local, 'n1');
+      const browser = mockWs(); h.handleBrowserConnection(browser.ws, 'ip', userSession);
+      expect(nodesListEv(browser.sent)).toBeUndefined();
+    });
+
+    it('admin 连接：见全部在线节点', () => {
+      const { handler: h, store } = makeHandler();
+      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip');
+      registerNode(store, local, 'n1'); registerNode(store, local, 'n2');
+      const browser = mockWs(); h.handleBrowserConnection(browser.ws, 'ip', adminSession);
+      expect(nodesListEv(browser.sent)?.map((n) => n.nodeId).sort()).toEqual(['n1', 'n2']);
+    });
+
+    it('ListNodes 命令 → user 收到过滤后的列表', () => {
+      const { handler: h, store, assignments } = makeHandler();
+      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip');
+      registerNode(store, local, 'n1'); registerNode(store, local, 'n2');
+      assignments.assign('u1', 'n2');
+      const browser = mockWs(); h.handleBrowserConnection(browser.ws, 'ip', userSession);
+      browser.sent.length = 0;
+      sendMsg(browser, { type: BrowserCommandType.ListNodes });
+      expect(nodesListEv(browser.sent)?.map((n) => n.nodeId)).toEqual(['n2']);
+    });
+
+    it('节点上线广播 → 每 user 收到各自过滤后的列表（admin 全、user 仅 assigned）', () => {
+      const { handler: h, store, assignments } = makeHandler();
+      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip');
+      registerNode(store, local, 'n1');
+      assignments.assign('u1', 'n1'); assignments.assign('u1', 'n2');
+      const user = mockWs(); h.handleBrowserConnection(user.ws, 'ip', userSession);
+      const admin = mockWs(); h.handleBrowserConnection(admin.ws, 'ip', adminSession);
+      user.sent.length = 0; admin.sent.length = 0;
+      registerNode(store, local, 'n2'); // n2 上线 → 广播
+      expect(nodesListEv(user.sent)?.map((n) => n.nodeId).sort()).toEqual(['n1', 'n2']);
+      expect(nodesListEv(admin.sent)?.map((n) => n.nodeId).sort()).toEqual(['n1', 'n2']);
+    });
+
+    it('节点上线但 user 未分配 → user 列表不含该节点', () => {
+      const { handler: h, store, assignments } = makeHandler();
+      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip');
+      registerNode(store, local, 'n1');
+      assignments.assign('u1', 'n1');
+      const user = mockWs(); h.handleBrowserConnection(user.ws, 'ip', userSession);
+      user.sent.length = 0;
+      registerNode(store, local, 'nX'); // 未分配给 u1
+      expect(nodesListEv(user.sent)?.map((n) => n.nodeId)).toEqual(['n1']);
+    });
+  });
+
+  describe('操作授权判定（Assignment，替代 NodeAuth isAuthenticated）', () => {
+    const userSession: BrowserSession = { userId: 'u1', username: 'alice', role: 'user' };
+    const adminSession: BrowserSession = { userId: 'a1', username: 'admin', role: 'admin' };
+
+    it('user 对未分配节点 Chat → error「无权访问」，local 不收到 chat', () => {
+      const { handler: h, store } = makeHandler();
+      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip'); registerNode(store, local, 'n1');
+      const browser = mockWs(); h.handleBrowserConnection(browser.ws, 'ip', userSession);
+      sendMsg(browser, { type: BrowserCommandType.Chat, sessionId: 's1', text: 'hi' });
+      expect(browser.sent).toContainEqual({ type: BrowserEventType.Error, error: '无权访问节点 n1' });
+      expect(local.sent.find((m) => (m as { type?: string }).type === 'chat')).toBeUndefined();
+    });
+
+    it('user 对已分配节点 Chat → 正常转发到 local', () => {
+      const { handler: h, store, assignments } = makeHandler();
+      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip'); registerNode(store, local, 'n1');
+      assignments.assign('u1', 'n1');
+      const browser = mockWs(); h.handleBrowserConnection(browser.ws, 'ip', userSession);
+      sendMsg(browser, { type: BrowserCommandType.Chat, sessionId: 's1', text: 'hi', projectPath: '/p' });
+      expect(local.sent).toContainEqual(expect.objectContaining({ type: 'chat', sessionId: 's1', text: 'hi' }));
+    });
+
+    it('授权实时：分配后即可操作（每命令查 DB）', () => {
+      const { handler: h, store, assignments } = makeHandler();
+      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip'); registerNode(store, local, 'n1');
+      const browser = mockWs(); h.handleBrowserConnection(browser.ws, 'ip', userSession);
+      sendMsg(browser, { type: BrowserCommandType.Chat, sessionId: 's1', text: 'hi' });
+      expect(browser.sent).toContainEqual({ type: BrowserEventType.Error, error: '无权访问节点 n1' });
+      assignments.assign('u1', 'n1'); // 运行中分配 → 立即生效
+      sendMsg(browser, { type: BrowserCommandType.Chat, sessionId: 's2', text: 'ok' });
+      expect(local.sent.find((m) => (m as { type?: string; sessionId?: string }).type === 'chat' && (m as { sessionId?: string }).sessionId === 's2')).toBeTruthy();
+    });
+
+    it('admin 对任意节点 Chat → 放行（即便未分配）', () => {
+      const { handler: h, store } = makeHandler();
+      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip'); registerNode(store, local, 'n1');
+      const browser = mockWs(); h.handleBrowserConnection(browser.ws, 'ip', adminSession);
+      sendMsg(browser, { type: BrowserCommandType.Chat, sessionId: 's1', text: 'hi' });
+      expect(browser.sent.find((m) => (m as { type?: string }).type === 'error')).toBeUndefined();
+      expect(local.sent.find((m) => (m as { type?: string }).type === 'chat')).toBeTruthy();
+    });
+
+    it('user 对未分配节点发 StopSession（按会话找节点）→ error，local 不收到', () => {
+      const { handler: h, store } = makeHandler();
+      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip'); registerNode(store, local, 'n1');
+      const browser = mockWs(); h.handleBrowserConnection(browser.ws, 'ip', userSession);
+      sendMsg(local, { type: LocalEventType.SessionInfo, sessionId: 's1', status: 'running', projectPath: '/x' });
+      sendMsg(browser, { type: BrowserCommandType.StopSession, sessionId: 's1' });
+      expect(browser.sent).toContainEqual({ type: BrowserEventType.Error, error: '无权访问节点 n1' });
+      expect(local.sent.find((m) => (m as { type?: string }).type === 'stop_session')).toBeUndefined();
+    });
+
+    it('user SelectNode 未分配节点 → 回「不在线」（不泄露存在性），不选中', () => {
+      const { handler: h, store } = makeHandler();
+      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip'); registerNode(store, local, 'n1');
+      const browser = mockWs(); h.handleBrowserConnection(browser.ws, 'ip', userSession);
+      sendMsg(browser, { type: BrowserCommandType.SelectNode, nodeId: 'n1' });
+      expect(browser.sent).toContainEqual({ type: BrowserEventType.Error, error: '节点 n1 不在线' });
+      expect(browser.sent.find((m) => (m as { type?: string }).type === BrowserEventType.NodeSelected)).toBeUndefined();
+    });
+
+    it('user SelectNode 已分配节点 → NodeSelected', () => {
+      const { handler: h, store, assignments } = makeHandler();
+      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip'); registerNode(store, local, 'n1');
+      assignments.assign('u1', 'n1');
+      const browser = mockWs(); h.handleBrowserConnection(browser.ws, 'ip', userSession);
+      sendMsg(browser, { type: BrowserCommandType.SelectNode, nodeId: 'n1' });
+      expect(browser.sent).toContainEqual({ type: BrowserEventType.NodeSelected, nodeId: 'n1' });
     });
   });
 });
