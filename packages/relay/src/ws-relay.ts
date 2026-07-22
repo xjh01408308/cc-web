@@ -30,15 +30,8 @@ const ANONYMOUS_ADMIN: BrowserSession = { userId: '', username: '', role: 'admin
 /** admin 调用 filterVisibleNodes 时传入的占位空集（admin 分支不读它，省一次 DB 查询）。 */
 const EMPTY_NODE_SET = new Set<string>();
 
-// 认证速率限制（browser 连接特有；属连接处理职责，未收进 4 个 domain module）
-const MAX_AUTH_FAILURES = 5;
-const AUTH_COOLDOWN_MS = 60000;
-
 const PING_INTERVAL_MS = 30000;
 const HTTP_REQUEST_TIMEOUT_MS = 5000;
-const AUTH_TIMEOUT_MS = 5000;
-// AuthNode 单次请求-响应超时后的重试上限（含首次）：跨公网偶发丢包容错
-const MAX_AUTH_ATTEMPTS = 2;
 // local 链路假死判定阈值：跨公网链路可能 TCP 假死（两端 ws 仍 OPEN 但中间断），
 // 超过此时间没收到 local 任何消息（含 pong）→ 主动关闭触发 local ws-client 重连重建。
 const LOCAL_IDLE_TIMEOUT_MS = 90000;
@@ -65,7 +58,6 @@ export class ConnectionHandler {
     (ws) => this.nodes.selectedNodeOfBrowser(ws),
   );
   private readonly matcher = new RequestMatcher();
-  private readonly authAttempts = new Map<WebSocket, { failures: number; lastAttempt: number }>();
 
   /**
    * nodeStore 用于 local 注册时校验预注册凭证（nodeId + nodeSecret，见 ADR-0004）；
@@ -85,10 +77,6 @@ export class ConnectionHandler {
     }
   }
 
-  private sendAuthRequired(ws: WebSocket, nodeId: string): void {
-    this.send(ws, { type: BrowserEventType.AuthRequired, nodeId, message: `节点 ${nodeId} 需要密码认证` });
-  }
-
   private broadcastNodesList(): void {
     // 每 browser 一份按其用户过滤后的节点列表（admin 全部；user 仅 assigned ∩ online）。
     this.router.broadcastPerBrowser((ws) => ({ type: BrowserEventType.NodesList, nodes: this.visibleNodesFor(ws) }));
@@ -106,8 +94,6 @@ export class ConnectionHandler {
 
   /**
    * 操作授权判定（Assignment，见 ADR-0005）：admin → 恒 true；user → 须被分配该 node。
-   * 替代已废弃的 NodeAuth isAuthenticated（密码第二因素）；isAuthenticated/markAuthenticated/
-   * sendAuthRequired/auth_node 协议族在此切片后成为死路径，由 T6 清理。
    */
   private canWsOperate(ws: WebSocket, nodeId: string): boolean {
     const st = this.states.get(ws);
@@ -249,70 +235,6 @@ export class ConnectionHandler {
         break;
       }
 
-      case BrowserCommandType.AuthNode: {
-        const authNodeId = msg.nodeId;
-        const password = msg.password;
-
-        // 速率限制检查
-        const attempts = this.authAttempts.get(ws);
-        if (attempts && attempts.failures >= MAX_AUTH_FAILURES) {
-          const elapsed = Date.now() - attempts.lastAttempt;
-          if (elapsed < AUTH_COOLDOWN_MS) {
-            this.send(ws, { type: BrowserEventType.AuthResult, nodeId: authNodeId, success: false, error: `认证失败过多，${Math.ceil((AUTH_COOLDOWN_MS - elapsed) / 1000)}秒后重试` });
-            return;
-          }
-          attempts.failures = 0;
-        }
-
-        if (!authNodeId || !this.nodes.has(authNodeId)) {
-          this.send(ws, { type: BrowserEventType.Error, error: `节点 ${authNodeId} 不在线` });
-          return;
-        }
-        const authNode = this.nodes.get(authNodeId)!;
-        const reqId = randomUUID();
-        // callback 闭包引用 timeout（let）：重试时重新赋值，clearTimeout 能取到最新句柄
-        let timeout: ReturnType<typeof setTimeout>;
-        this.matcher.register(reqId, (resultMsg) => {
-          clearTimeout(timeout);
-          const result = resultMsg as LocalEvent;
-          const success = result.type === LocalEventType.AuthResult ? result.success : false;
-          if (success) {
-            this.authAttempts.delete(ws);
-            this.nodes.markAuthenticated(ws, authNodeId);
-          } else {
-            if (!this.authAttempts.has(ws)) this.authAttempts.set(ws, { failures: 0, lastAttempt: 0 });
-            const att = this.authAttempts.get(ws)!;
-            att.failures++;
-            att.lastAttempt = Date.now();
-          }
-          const error = result.type === LocalEventType.AuthResult ? result.error : undefined;
-          this.send(ws, { type: BrowserEventType.AuthResult, nodeId: authNodeId, success, error });
-        });
-        // 跨公网（local 本地 ↔ relay 云主机）偶发丢包会让单次 AuthNode 超时；超时后
-        // 重发一次（matcher 里的 callback 仍在，local 迟到的回包也会被正确匹配），
-        // 用尽 MAX_AUTH_ATTEMPTS 才向浏览器报"认证超时"。
-        let authRetry = 0;
-        const sendAuthToNode = (): void => {
-          this.send(authNode.ws, { type: LocalCommandType.AuthNode, password, _reqId: reqId });
-        };
-        const scheduleAuthTimeout = (): void => {
-          timeout = setTimeout(() => {
-            if (!this.matcher.has(reqId)) return;
-            authRetry++;
-            if (authRetry < MAX_AUTH_ATTEMPTS) {
-              sendAuthToNode();
-              scheduleAuthTimeout();
-            } else {
-              this.matcher.take(reqId);
-              this.send(ws, { type: BrowserEventType.AuthResult, nodeId: authNodeId, success: false, error: '认证超时' });
-            }
-          }, AUTH_TIMEOUT_MS);
-        };
-        sendAuthToNode();
-        scheduleAuthTimeout();
-        return;
-      }
-
       case BrowserCommandType.ChangePermissionMode: {
         const conn = this.resolveForSession(ws, msg.sessionId);
         if (conn) {
@@ -400,16 +322,12 @@ export class ConnectionHandler {
     return filterVisibleNodes(this.nodes.listNodes(), role, assigned);
   }
 
-  isNodePasswordRequired(nodeId: string): boolean {
-    return this.nodes.isPasswordRequired(nodeId);
-  }
-
   // ---- 本地服务消息处理 ----
 
   private handleLocalMessage(ws: WebSocket, msg: LocalEvent): void {
     // local 每发一条消息（含 pong）都更新活跃时间，供心跳做链路假死检测
     this.states.touch(ws);
-    // HTTP API / AuthNode 响应匹配
+    // HTTP API 响应匹配
     const reqId = (msg as unknown as Record<string, unknown>)._reqId as string | undefined;
     if (reqId) {
       const httpCb = this.matcher.take(reqId);
@@ -442,7 +360,7 @@ export class ConnectionHandler {
           ws.close();
           return;
         }
-        const replaced = this.nodes.register(nodeId, { ws, nodeId, passwordRequired: msg.passwordRequired === true, workspaceRoot: msg.workspaceRoot });
+        const replaced = this.nodes.register(nodeId, { ws, nodeId, workspaceRoot: msg.workspaceRoot });
         if (replaced) {
           const oldSt = this.states.get(replaced.ws);
           const oldIp = oldSt?.ip ?? '?';
@@ -455,7 +373,7 @@ export class ConnectionHandler {
           replaced.ws.close();
         }
         this.states.setNodeId(ws, nodeId);
-        console.log(`[relay] 节点已注册: ${nodeId} | IP: ${ip} | 需密码: ${msg.passwordRequired === true} | 在线节点: ${this.nodes.size}`);
+        console.log(`[relay] 节点已注册: ${nodeId} | IP: ${ip} | 在线节点: ${this.nodes.size}`);
         this.send(ws, { type: LocalControlType.Registered });
         this.broadcastNodesList();
         break;
@@ -521,7 +439,7 @@ export class ConnectionHandler {
     this.states.init(ws, ip);
     this.states.setBrowserUser(ws, session.userId, session.role);
     this.router.addBrowser(ws);
-    this.nodes.forgetBrowser(ws); // 清掉可能残留的选中/认证态（原 browserNodeMap.delete(ws)）
+    this.nodes.forgetBrowser(ws); // 清掉可能残留的选中态（原 browserNodeMap.delete(ws)）
     console.log(`[relay] 浏览器已连接 | IP: ${ip} | user: ${session.username || '(匿名)'} | 在线: ${this.router.size}`);
 
     // 通知当前节点列表（按该用户过滤：admin 全部；user 仅 assigned ∩ online）
@@ -545,7 +463,6 @@ export class ConnectionHandler {
       const duration = st ? `${((Date.now() - st.connectedAt) / 1000).toFixed(1)}s` : '?';
       this.router.removeBrowser(ws);
       this.nodes.forgetBrowser(ws);
-      this.authAttempts.delete(ws);
       this.matcher.forgetBrowser(ws);
       console.log(`[relay] 浏览器已断开 | IP: ${ip} | 持续: ${duration} | closeCode: ${code} | 在线: ${this.router.size}`);
     });
@@ -606,7 +523,7 @@ export class ConnectionHandler {
         this.send(ws, { type: LocalControlType.Ping });
         // 跨公网链路可能 TCP 假死（local 侧 ws 仍 OPEN，故 local 端无重连日志）：
         // 超过 LOCAL_IDLE_TIMEOUT_MS 没收到 local 任何消息 → 主动关闭，触发 local
-        // ws-client 重连重建一条干净链路；否则 relay 会一直往死连接上发 AuthNode 必然超时
+        // ws-client 重连重建一条干净链路；否则 relay 会一直往死连接上发命令必然超时
         const last = this.states.lastSeenOf(ws);
         if (last && Date.now() - last >= LOCAL_IDLE_TIMEOUT_MS) {
           const idle = Math.round((Date.now() - last) / 1000);
@@ -647,9 +564,5 @@ export function requestLocal(data: Record<string, unknown>, nodeId?: string): Pr
 
 export function getOnlineNodesForUser(userId: string, role: UserRole): NodeSummary[] {
   return relay!.getOnlineNodesForUser(userId, role);
-}
-
-export function isNodePasswordRequired(nodeId: string): boolean {
-  return relay!.isNodePasswordRequired(nodeId);
 }
 

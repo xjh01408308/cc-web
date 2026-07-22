@@ -2,11 +2,11 @@ import { randomUUID } from 'node:crypto';
 import type { WebSocket } from 'ws';
 
 // 收拢原 ws-relay.ts 里两套请求-响应匹配：
-//   pendingRequests (HTTP API + AuthNode)   reqId → (msg) => void
+//   pendingRequests (HTTP API)              reqId → (msg) => void
 //   browserRequests                          reqId → { ws, type, timeout }
 //
-// 两套超时语义不同，故 HTTP/AuthNode 的超时由调用方管理（requestLocal reject Promise、
-// AuthNode 发「认证超时」消息），matcher 只管 reqId → cb 映射；
+// 两套超时语义不同，故 HTTP 的超时由调用方管理（requestLocal reject Promise），
+// matcher 只管 reqId → cb 映射；
 // 浏览器请求是 fire-and-forget 投给 local，超时仅作 GC 清理，故内置 timeout。
 export class RequestMatcher {
   private httpPending = new Map<string, (data: unknown) => void>();
@@ -14,7 +14,7 @@ export class RequestMatcher {
 
   constructor(private readonly newId: () => string = randomUUID) {}
 
-  // --- HTTP / AuthNode 请求-响应 ---
+  // --- HTTP 请求-响应 ---
 
   register(reqId: string, cb: (data: unknown) => void): void {
     this.httpPending.set(reqId, cb);

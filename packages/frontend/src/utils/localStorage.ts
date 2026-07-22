@@ -1,8 +1,7 @@
-// localStorage 持久化辅助：最后浏览态 + 节点密码。
+// localStorage 持久化辅助：最后浏览态。
 // 纯函数，dispatcher 与 ChatView 直接 import（非 hook、非 DI）。
 
 const LAST_VIEW_KEY = "cc-web-last-view";
-const NODE_PASSWORDS_KEY = "cc-web-node-passwords";
 
 export interface LastView {
   nodeId?: string;
@@ -43,33 +42,4 @@ export function loadLastView(): LastView | null {
   } catch {
     return null;
   }
-}
-
-function loadNodePasswords(): Record<string, string> {
-  try {
-    const raw = localStorage.getItem(NODE_PASSWORDS_KEY);
-    return raw ? JSON.parse(raw) : {};
-  } catch {
-    return {};
-  }
-}
-
-export function saveNodePassword(nodeId: string, password: string): void {
-  try {
-    const passwords = loadNodePasswords();
-    passwords[nodeId] = password;
-    localStorage.setItem(NODE_PASSWORDS_KEY, JSON.stringify(passwords));
-  } catch {}
-}
-
-export function removeNodePassword(nodeId: string): void {
-  try {
-    const passwords = loadNodePasswords();
-    delete passwords[nodeId];
-    localStorage.setItem(NODE_PASSWORDS_KEY, JSON.stringify(passwords));
-  } catch {}
-}
-
-export function loadNodePassword(nodeId: string): string | null {
-  return loadNodePasswords()[nodeId] || null;
 }

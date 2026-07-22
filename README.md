@@ -98,7 +98,6 @@ RELAY_URL=ws://127.0.0.1:3001/ws/local
 NODE_ID=<管理员预注册时指定的节点 ID>      # 必填：管理员在 /admin 预注册 Node 后获得
 NODE_SECRET=<预注册后展示一次的注册凭证>    # 必填：每 Node 独立，替代已废弃的 RELAY_TOKEN
 RELAY_CA_CERT=                  # wss 自签名证书 CA 路径（留空用系统 CA）
-NODE_PASSWORD=                  # 节点登录密码（留空不启用认证）
 WORKSPACE_ROOT=                 # 项目工作区根目录（留空不限制路径）
 RECONNECT_DELAY=2000            # 重连初始延迟（毫秒）
 MAX_RECONNECT_DELAY=30000       # 重连最大延迟（毫秒）
@@ -223,7 +222,7 @@ cc-web/
 │   │       ├── ws-client.ts      # WebSocket 客户端（自动重连）
 │   │       ├── sdk-runner.ts     # spawn claude CLI → NDJSON
 │   │       ├── session-manager.ts # 会话生命周期 + JSON 持久化
-│   │       └── config.ts         # 中转地址 / 认证 / 节点密码配置
+│   │       └── config.ts         # 中转地址 / Node 凭证配置
 │   └── shared/                   # 前后端共享类型
 │       └── types.ts              # StreamResponse / ChatRequest / Git/Diff/FileTree
 ```
@@ -290,7 +289,7 @@ data/sessions/
 - **认证机制**：
   - 中转 ↔ 本地：每 Node 独立预注册凭证 (`NODE_ID` + `NODE_SECRET`)，管理员在 `/admin` 预注册后下发；未预注册或凭证错的 local 连不上（见 ADR-0004，已废弃全局 `RELAY_TOKEN`）
   - 浏览器 ↔ 中转：多用户登录（用户名 + 密码 → httpOnly cookie session），首个 admin 经 `INITIAL_ADMIN_*` seed
-  - 浏览器 ↔ 节点：可选密码认证 (`NODE_PASSWORD`)
+  - 操作授权：Assignment（relay 侧 user↔Node 多对多），被分配的 user 即可完全操作该 Node（见 ADR-0005；已废弃节点密码 `NODE_PASSWORD`）
 - **路径安全**：静态文件服务路径穿越防护，API 端点路径白名单
 - **部署安全**：本地服务不暴露端口，仅作 WS 客户端
 

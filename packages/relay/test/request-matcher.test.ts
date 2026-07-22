@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { WebSocket } from 'ws';
 import { RequestMatcher } from '../src/request-matcher.js';
 
-describe('RequestMatcher — HTTP / AuthNode pending（reqId → cb）', () => {
+describe('RequestMatcher — HTTP pending（reqId → cb）', () => {
   it('register + has + take 命中，take 后自动清除', () => {
     const m = new RequestMatcher();
     const cb = vi.fn();
