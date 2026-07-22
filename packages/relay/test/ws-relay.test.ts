@@ -370,3 +370,50 @@ describe('ConnectionHandler', () => {
     });
   });
 });
+
+// 心跳阈值改为 env 可配（T7，#26）：单独 describe 用 resetModules + 动态 import，
+// 在 import 前 set env，让 ws-relay 重新求值 config 拿到自定义阈值。
+describe('心跳阈值可配置（env 覆盖）', () => {
+  let cleanup: (() => void) | undefined;
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => {
+    cleanup?.();
+    cleanup = undefined;
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    delete process.env.RELAY_PING_INTERVAL_MS;
+    delete process.env.RELAY_LOCAL_IDLE_TIMEOUT_MS;
+  });
+
+  it('RELAY_PING_INTERVAL_MS / RELAY_LOCAL_IDLE_TIMEOUT_MS env 覆盖默认 30s/90s → 按自定义阈值判定假死', async () => {
+    vi.resetModules();
+    process.env.RELAY_PING_INTERVAL_MS = '5000';
+    process.env.RELAY_LOCAL_IDLE_TIMEOUT_MS = '10000';
+    const { ConnectionHandler } = await import('../src/ws-relay.js');
+    const { NodeStore } = await import('../src/node-store.js');
+    const { AssignmentStore } = await import('../src/assignment-store.js');
+
+    const dbPath = path.join(os.tmpdir(), `cc-web-relay-cfg-${randomUUID()}.db`);
+    const store = new NodeStore(dbPath);
+    const assignments = new AssignmentStore(dbPath);
+    cleanup = (): void => {
+      store.close();
+      assignments.close();
+      for (const suffix of ['', '-wal', '-shm']) fs.rmSync(dbPath + suffix, { force: true });
+    };
+    const h = new ConnectionHandler(store, assignments);
+
+    const local = mockWs();
+    h.handleLocalConnection(local.ws, 'ip');
+    const secret = store.createNode('n1').secret;
+    sendMsg(local, { type: LocalEventType.Register, nodeId: 'n1', nodeSecret: secret, workspaceRoot: '/a' });
+    expect(local.closed).toBe(false);
+
+    // ping 周期 5s：t=5s tick 时 elapsed=5s < 10s 阈值，不关
+    vi.advanceTimersByTime(9000);
+    expect(local.closed).toBe(false);
+    // t=10s tick：elapsed=10s >= 10s 阈值 → 判定假死主动关（默认 90s 此刻不会关）
+    vi.advanceTimersByTime(2000);
+    expect(local.closed).toBe(true);
+  });
+});

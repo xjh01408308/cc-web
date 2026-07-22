@@ -87,6 +87,8 @@ RELAY_PORT=3001                 # 监听端口
 INITIAL_ADMIN_USER=admin        # 首 admin 种子（仅 users 表为空时创建一次）
 INITIAL_ADMIN_PASSWORD=<管理员密码>  # 浏览器登录密码（首启创建首个 admin）
 STATIC_DIR=../../frontend/dist  # 前端静态文件路径
+RELAY_PING_INTERVAL_MS=30000    # relay→local 心跳 Ping 间隔（毫秒，默认 30s）
+RELAY_LOCAL_IDLE_TIMEOUT_MS=90000  # relay 侧判定 local 链路假死的阈值（毫秒，默认 90s）
 ```
 
 `packages/local/.env`（本地服务）：
@@ -101,6 +103,7 @@ RELAY_CA_CERT=                  # wss 自签名证书 CA 路径（留空用系�
 WORKSPACE_ROOT=                 # 项目工作区根目录（留空不限制路径）
 RECONNECT_DELAY=2000            # 重连初始延迟（毫秒）
 MAX_RECONNECT_DELAY=30000       # 重连最大延迟（毫秒）
+RELAY_IDLE_TIMEOUT_MS=90000     # local 侧 relay 假死阈值（毫秒，默认 90s，超此未收消息即断开重连）
 CLAUDE_FORCE_PERMISSION_MODE=   # 强制锁定权限模式（留空以前端为准）
 ```
 
