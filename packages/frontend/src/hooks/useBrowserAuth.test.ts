@@ -38,6 +38,28 @@ describe("useBrowserAuth — session 探测（mount effect）", () => {
     expect(urls.some((u) => u.includes("/api/login"))).toBe(false);
   });
 
+  it("session 带 user → currentUser 捕获 username/role（admin 入口/守卫据此判断）", async () => {
+    const fetchMock = vi.fn((url: string) => {
+      if (url.includes("/api/session")) {
+        return Promise.resolve(mockResponse(true, { user: { username: "admin", role: "admin" } }));
+      }
+      return Promise.resolve(mockResponse(false));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderHook(() => useBrowserAuth());
+    await waitFor(() => expect(result.current.authed).toBe(true));
+
+    expect(result.current.currentUser).toEqual({ username: "admin", role: "admin" });
+  });
+
+  it("session 探测落定后 sessionChecked=true（无论是否登录）", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(mockResponse(false))));
+    const { result } = renderHook(() => useBrowserAuth());
+    await waitFor(() => expect(result.current.sessionChecked).toBe(true));
+    expect(result.current.authed).toBe(false);
+  });
+
   it("无 session → 保持未登录，仅探测一次 /api/login 不被调用", async () => {
     const fetchMock = vi.fn((_url: string) => Promise.resolve(mockResponse(false)));
     vi.stubGlobal("fetch", fetchMock);
@@ -88,6 +110,33 @@ describe("useBrowserAuth — handleLogin（用户名 + 密码）", () => {
     const loginCall = fetchMock.mock.calls.find((c) => (c[0] as string).includes("/api/login"));
     const body = JSON.parse((loginCall![1] as RequestInit).body as string);
     expect(body).toEqual({ username: "admin", password: "secret" });
+  });
+
+  it("登录成功且响应含 user → currentUser 捕获（无需二次请求 /api/session）", async () => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.includes("/api/session")) return mockResponse(false);
+      const body = init?.body ? JSON.parse(init.body as string) : {};
+      if (body.username === "admin" && body.password === "secret") {
+        return mockResponse(true, { ok: true, user: { username: "admin", role: "admin" } });
+      }
+      return mockResponse(false);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderHook(() => useBrowserAuth());
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+
+    act(() => {
+      result.current.setLoginUsername("admin");
+      result.current.setLoginPassword("secret");
+    });
+    await act(async () => { await result.current.handleLogin(); });
+
+    expect(result.current.authed).toBe(true);
+    expect(result.current.currentUser).toEqual({ username: "admin", role: "admin" });
+    // 登录后不应再额外请求 /api/session（user 已由登录响应回传）
+    const sessionCalls = fetchMock.mock.calls.filter((c) => (c[0] as string).includes("/api/session"));
+    expect(sessionCalls).toHaveLength(1);
   });
 
   it("错误凭据 → loginError 设置 + authed 保持 false", async () => {

@@ -49,6 +49,7 @@ export function ChatView() {
   const {
     authed,
     clearSession,
+    currentUser,
     loginUsername,
     setLoginUsername,
     loginPassword,
@@ -752,6 +753,16 @@ export function ChatView() {
             <span className="text-xs text-slate-500 dark:text-slate-400">
               {activeSessionId ? "会话中" : "cc-web"}
             </span>
+          )}
+          {/* admin 入口：仅 admin 可见（UX 隐藏；授权由 relay 侧 requireAdmin 强制） */}
+          {currentUser?.role === "admin" && (
+            <a
+              href="/admin"
+              className="ml-auto text-xs px-2 py-1 rounded-md text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-700"
+              title="用户管理"
+            >
+              管理
+            </a>
           )}
         </div>
         {pendingAuthNodeId && !autoAuthInProgress && (

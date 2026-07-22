@@ -29,6 +29,17 @@ export interface UserRow {
 }
 
 /**
+ * 用户公开视图（listUsers 返回）：剥去 password_hash，created_at 转 camelCase。
+ * 管理列表回传前端用此形状——绝不把 password_hash 送出 relay。
+ */
+export interface PublicUser {
+  id: string;
+  username: string;
+  role: UserRole;
+  createdAt: number;
+}
+
+/**
  * scrypt 哈希：输出 `saltHex:hashHex`。每次随机 salt，故同密码哈希不同。
  * 校验时按存储的 salt 重算并 timingSafeEqual 比对（常数时间，不泄露长度差异之外的信息）。
  */
@@ -83,6 +94,19 @@ export class UserStore {
     return this.db.prepare('SELECT * FROM users WHERE username = ?').get(username) as UserRow | undefined;
   }
 
+  /** 按 id 查单个用户（含 password_hash，仅供内部/管理操作前校验角色，不回传前端）。 */
+  getUserById(id: string): UserRow | undefined {
+    return this.db.prepare('SELECT * FROM users WHERE id = ?').get(id) as UserRow | undefined;
+  }
+
+  /**
+   * 列出全部用户（不含 password_hash）。admin 管理视图消费；密码哈希绝不外泄。
+   */
+  listUsers(): PublicUser[] {
+    const rows = this.db.prepare('SELECT id, username, role, created_at FROM users ORDER BY created_at ASC').all() as Array<Pick<UserRow, 'id' | 'username' | 'role' | 'created_at'>>;
+    return rows.map((r) => ({ id: r.id, username: r.username, role: r.role, createdAt: r.created_at }));
+  }
+
   /**
    * 创建用户。本 ticket 仅 seedInitialAdmin 内部 + 单测消费；导出是因为下一 ticket（admin 管理用户）
    * 将直接调用它，且单测需借此验证 salt 随机性。返回的 UserRow 含 password_hash，仅供内部/测试，不回传前端。
@@ -116,5 +140,25 @@ export class UserStore {
     if (this.countUsers() > 0) return { seeded: false, username: '' };
     this.createUser(username, password, 'admin');
     return { seeded: true, username };
+  }
+
+  /**
+   * 重置密码：用新密码重新哈希覆写。命中返回 true，未命中（id 不存在）返回 false。
+   * 管理端调用前应自行校验目标角色（admin 只能重置普通 user，见 admin-routes）。
+   */
+  resetPassword(id: string, newPassword: string): boolean {
+    const existing = this.getUserById(id);
+    if (!existing) return false;
+    this.db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(newPassword), id);
+    return true;
+  }
+
+  /**
+   * 删除用户。命中返回 true，未命中返回 false。
+   * 管理端调用前应自行校验目标角色（admin 只能删普通 user，见 admin-routes）。
+   */
+  deleteUser(id: string): boolean {
+    const result = this.db.prepare('DELETE FROM users WHERE id = ?').run(id);
+    return result.changes > 0;
   }
 }
