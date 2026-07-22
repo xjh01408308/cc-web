@@ -212,26 +212,6 @@ describe("useBrowserAuth — authFetch（401 session 失效）", () => {
     expect(result.current.initialLoadDone.current).toBe(false); // 加载守卫重置
   });
 
-  it("401 auth_required（节点密码拦截）→ 透传 response，不清登录态", async () => {
-    const fetchMock = vi.fn((url: string) => {
-      if (url === "/api/projects") {
-        return Promise.resolve(mockResponse(false, { error: 'auth_required', message: '此节点需要密码认证' }));
-      }
-      return Promise.resolve(mockResponse(true));
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const { result } = renderHook(() => useBrowserAuth());
-    await waitFor(() => expect(result.current.authed).toBe(true));
-
-    let resp: Response | undefined;
-    await act(async () => { resp = await result.current.authFetch("/api/projects"); });
-
-    expect(resp?.status).toBe(401);
-    expect((await resp!.json()).error).toBe('auth_required');
-    expect(result.current.authed).toBe(true); // 未被 clearSession 踢回登录页
-  });
-
   it("200 → 正常返回 Response", async () => {
     const fetchMock = vi.fn(() => Promise.resolve(mockResponse(true)));
     vi.stubGlobal("fetch", fetchMock);

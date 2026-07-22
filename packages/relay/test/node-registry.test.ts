@@ -6,7 +6,7 @@ function fakeWs(): WebSocket {
   return {} as WebSocket;
 }
 function conn(nodeId: string, opts: Partial<NodeConn> = {}): NodeConn {
-  return { ws: fakeWs(), nodeId, passwordRequired: false, ...opts };
+  return { ws: fakeWs(), nodeId, ...opts };
 }
 
 describe('NodeRegistry — 节点注册', () => {
@@ -77,7 +77,7 @@ describe('NodeRegistry — 会话 ↔ 节点', () => {
   });
 });
 
-describe('NodeRegistry — 浏览器选中节点 + 认证', () => {
+describe('NodeRegistry — 浏览器选中节点', () => {
   it('selectNodeForBrowser / selectedNodeOfBrowser / forgetBrowser', () => {
     const reg = new NodeRegistry();
     const ws = fakeWs();
@@ -85,29 +85,6 @@ describe('NodeRegistry — 浏览器选中节点 + 认证', () => {
     expect(reg.selectedNodeOfBrowser(ws)).toBe('n1');
     reg.forgetBrowser(ws);
     expect(reg.selectedNodeOfBrowser(ws)).toBeUndefined();
-  });
-
-  it('isAuthenticated：节点不需密码 → 恒 true', () => {
-    const reg = new NodeRegistry();
-    reg.register('n1', conn('n1', { passwordRequired: false }));
-    expect(reg.isAuthenticated(fakeWs(), 'n1')).toBe(true);
-  });
-
-  it('isAuthenticated：需密码，未认证 false → markAuthenticated → true；forgetBrowser 清零', () => {
-    const reg = new NodeRegistry();
-    reg.register('n1', conn('n1', { passwordRequired: true }));
-    const ws = fakeWs();
-    expect(reg.isAuthenticated(ws, 'n1')).toBe(false);
-    reg.markAuthenticated(ws, 'n1');
-    expect(reg.isAuthenticated(ws, 'n1')).toBe(true);
-    reg.forgetBrowser(ws);
-    expect(reg.isAuthenticated(ws, 'n1')).toBe(false);
-  });
-
-  // 与原 ws-relay.ts 行为保持：`if (!node || !node.passwordRequired) return true`
-  // 未知节点命中 !node 分支也返回 true；调用方须先经 resolveTarget/has 确认节点存在。
-  it('isAuthenticated：未知节点 → true（原 quirk；调用方须先确认节点在线）', () => {
-    expect(new NodeRegistry().isAuthenticated(fakeWs(), 'nope')).toBe(true);
   });
 });
 
@@ -162,21 +139,14 @@ describe('NodeRegistry — resolveTarget（browser 消息目标解析）', () =>
 });
 
 describe('NodeRegistry — 列表与查询', () => {
-  it('listNodes 聚合 sessionCount / passwordRequired / workspaceRoot', () => {
+  it('listNodes 聚合 sessionCount / workspaceRoot', () => {
     const reg = new NodeRegistry();
-    reg.register('n1', conn('n1', { passwordRequired: true, workspaceRoot: '/a' }));
-    reg.register('n2', conn('n2', { passwordRequired: false }));
+    reg.register('n1', conn('n1', { workspaceRoot: '/a' }));
+    reg.register('n2', conn('n2'));
     reg.bindSession('s1', 'n1');
     reg.bindSession('s2', 'n1');
     const list = reg.listNodes();
-    expect(list).toContainEqual({ nodeId: 'n1', sessionCount: 2, passwordRequired: true, workspaceRoot: '/a' });
-    expect(list).toContainEqual({ nodeId: 'n2', sessionCount: 0, passwordRequired: false, workspaceRoot: undefined });
-  });
-
-  it('isPasswordRequired 直接查节点；未知节点 false', () => {
-    const reg = new NodeRegistry();
-    reg.register('n1', conn('n1', { passwordRequired: true }));
-    expect(reg.isPasswordRequired('n1')).toBe(true);
-    expect(reg.isPasswordRequired('nope')).toBe(false);
+    expect(list).toContainEqual({ nodeId: 'n1', sessionCount: 2, workspaceRoot: '/a' });
+    expect(list).toContainEqual({ nodeId: 'n2', sessionCount: 0, workspaceRoot: undefined });
   });
 });

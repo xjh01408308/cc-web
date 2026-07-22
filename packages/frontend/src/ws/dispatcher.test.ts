@@ -1,15 +1,8 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { dispatchBrowserEvent } from "./dispatcher";
 import type { DispatchContext } from "./dispatcher";
 import { BrowserEventType } from "../types";
 import type { BrowserEvent } from "../types";
-import { loadLastView, removeNodePassword } from "../utils/localStorage";
-
-// dispatcher 直接 import localStorage utils（非 ctx 注入），故 mock 模块。
-vi.mock("../utils/localStorage", () => ({
-  loadLastView: vi.fn(),
-  removeNodePassword: vi.fn(),
-}));
 
 // ---- mock context 工厂 ----
 
@@ -25,13 +18,8 @@ function createMockContext(overrides: object = {}) {
     currentAssistantMessageRef: { current: null },
     pendingSessionRef: { current: null },
     creatingNewSessionRef: { current: false },
-    autoAuthTimeoutRef: { current: null },
     setNodes: vi.fn(),
     setActiveNodeId: vi.fn(),
-    setAuthenticatedNodes: vi.fn(),
-    setPendingAuthNodeId: vi.fn(),
-    setAuthError: vi.fn(),
-    setAutoAuthInProgress: vi.fn(),
     setProjects: vi.fn(),
     setSessions: vi.fn(),
     setActiveSessionId: vi.fn(),
@@ -58,13 +46,6 @@ function createMockContext(overrides: object = {}) {
 function ev(partial: Record<string, unknown>): BrowserEvent {
   return partial as unknown as BrowserEvent;
 }
-
-// loadLastView / removeNodePassword 是模块级单例 mock，每个测试前重置调用与实现。
-beforeEach(() => {
-  vi.mocked(loadLastView).mockReset();
-  vi.mocked(loadLastView).mockReturnValue(null);
-  vi.mocked(removeNodePassword).mockReset();
-});
 
 describe("dispatchBrowserEvent — nodeId 过滤", () => {
   it("早期类型（NodesList）不经 nodeId 过滤", () => {
@@ -139,101 +120,6 @@ describe("dispatchBrowserEvent — NodesList", () => {
     const ctx = createMockContext();
     dispatchBrowserEvent(ev({ type: BrowserEventType.NodesList }), ctx);
     expect(ctx.setNodes).not.toHaveBeenCalled();
-  });
-});
-
-describe("dispatchBrowserEvent — AuthResult", () => {
-  it("成功 → 加入 authenticatedNodes、清 pending、从 loadLastView 恢复 pendingSession", () => {
-    vi.mocked(loadLastView).mockReturnValue({ nodeId: "n1", sessionId: "sess-9" });
-    const ctx = createMockContext();
-    dispatchBrowserEvent(
-      ev({ type: BrowserEventType.AuthResult, nodeId: "n1", success: true }),
-      ctx,
-    );
-    expect(ctx.setAuthenticatedNodes).toHaveBeenCalledTimes(1);
-    const updater = ctx.setAuthenticatedNodes.mock.calls[0][0] as (
-      prev: Set<string>,
-    ) => Set<string>;
-    expect(updater(new Set()).has("n1")).toBe(true);
-    expect(ctx.setPendingAuthNodeId).toHaveBeenCalledWith(null);
-    expect(ctx.setAuthError).toHaveBeenCalledWith(null);
-    expect(ctx.setAutoAuthInProgress).toHaveBeenCalledWith(false);
-    expect(ctx.pendingSessionRef.current).toBe("sess-9");
-  });
-
-  it("成功 + pendingSession 已设 → 不覆盖", () => {
-    const ctx = createMockContext({
-      pendingSessionRef: { current: "existing" },
-    });
-    dispatchBrowserEvent(
-      ev({ type: BrowserEventType.AuthResult, nodeId: "n1", success: true }),
-      ctx,
-    );
-    expect(ctx.pendingSessionRef.current).toBe("existing");
-    expect(loadLastView).not.toHaveBeenCalled();
-  });
-
-  it("密码错误 → 移除保存密码、设置错误", () => {
-    const ctx = createMockContext();
-    dispatchBrowserEvent(
-      ev({ type: BrowserEventType.AuthResult, nodeId: "n1", success: false, error: "密码错误" }),
-      ctx,
-    );
-    expect(removeNodePassword).toHaveBeenCalledWith("n1");
-    expect(ctx.setAuthError).toHaveBeenCalledWith("密码错误");
-    expect(ctx.setAutoAuthInProgress).toHaveBeenCalledWith(false);
-  });
-
-  it("认证超时 → 不移除保存密码（链路瞬时问题非密码错），仍设置错误", () => {
-    const ctx = createMockContext();
-    dispatchBrowserEvent(
-      ev({ type: BrowserEventType.AuthResult, nodeId: "n1", success: false, error: "认证超时" }),
-      ctx,
-    );
-    expect(removeNodePassword).not.toHaveBeenCalled();
-    expect(ctx.setAuthError).toHaveBeenCalledWith("认证超时");
-    expect(ctx.setAutoAuthInProgress).toHaveBeenCalledWith(false);
-  });
-
-  it("失败 + 无 error → 默认错误文案", () => {
-    const ctx = createMockContext();
-    dispatchBrowserEvent(
-      ev({ type: BrowserEventType.AuthResult, nodeId: "n1", success: false }),
-      ctx,
-    );
-    expect(ctx.setAuthError).toHaveBeenCalledWith("认证失败");
-  });
-
-  it("成功 + 有 timeout 句柄 → 清除", () => {
-    const handle = setTimeout(() => {}, 10000);
-    const ctx = createMockContext({
-      autoAuthTimeoutRef: { current: handle },
-    });
-    dispatchBrowserEvent(
-      ev({ type: BrowserEventType.AuthResult, nodeId: "n1", success: true }),
-      ctx,
-    );
-    expect(ctx.autoAuthTimeoutRef.current).toBeNull();
-    clearTimeout(handle);
-  });
-});
-
-describe("dispatchBrowserEvent — AuthRequired", () => {
-  it("设置 pendingAuthNodeId、停止 loading", () => {
-    const ctx = createMockContext();
-    dispatchBrowserEvent(
-      ev({ type: BrowserEventType.AuthRequired, nodeId: "n1", message: "need pw" }),
-      ctx,
-    );
-    expect(ctx.setPendingAuthNodeId).toHaveBeenCalledWith("n1");
-    expect(ctx.setIsLoading).toHaveBeenCalledWith(false);
-    expect(ctx.setTaskProgress).toHaveBeenCalledWith(null);
-  });
-
-  it("无 nodeId → no-op", () => {
-    const ctx = createMockContext();
-    dispatchBrowserEvent(ev({ type: BrowserEventType.AuthRequired }), ctx);
-    expect(ctx.setPendingAuthNodeId).not.toHaveBeenCalled();
   });
 });
 

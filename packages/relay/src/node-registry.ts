@@ -4,7 +4,6 @@ import type { WebSocket } from 'ws';
 export interface NodeConn {
   ws: WebSocket;
   nodeId: string;
-  passwordRequired: boolean;
   workspaceRoot?: string;
 }
 
@@ -16,19 +15,17 @@ export type ResolveResult =
 export interface NodeSummary {
   nodeId: string;
   sessionCount: number;
-  passwordRequired: boolean;
   workspaceRoot?: string;
 }
 
-// 收拢原 ws-relay.ts 里 4 个节点相关的模块级 Map 单例：
-//   localNodes / sessionNodeMap / browserNodeMap / authenticatedBrowsers
-// 全部节点生命周期、会话↔节点绑定、浏览器选中节点、浏览器认证态操作集中于此，
+// 收拢原 ws-relay.ts 里 3 个节点相关的模块级 Map 单例：
+//   localNodes / sessionNodeMap / browserNodeMap
+// 全部节点生命周期、会话↔节点绑定、浏览器选中节点操作集中于此，
 // 不触碰 ws.send —— 纯数据操作，可独立单测。传输动作由 ConnectionHandler 调用方决定。
 export class NodeRegistry {
   private nodes = new Map<string, NodeConn>();                       // nodeId → conn
   private sessionNode = new Map<string, string>();                   // sessionId → nodeId
   private browserNode = new Map<WebSocket, string>();                // browser ws → 选中 nodeId
-  private authedBrowsers = new Map<WebSocket, Set<string>>();        // browser ws → 已认证 nodeId 集
 
   // --- 节点 ---
 
@@ -110,28 +107,9 @@ export class NodeRegistry {
     return this.browserNode.get(ws);
   }
 
-  /** 浏览器断开：清选中节点 + 认证态 */
+  /** 浏览器断开：清选中节点 */
   forgetBrowser(ws: WebSocket): void {
     this.browserNode.delete(ws);
-    this.authedBrowsers.delete(ws);
-  }
-
-  // --- 认证状态 ---
-
-  /** 节点不需密码 → 恒 true；需密码 → 看该 browser 是否已 markAuthenticated */
-  isAuthenticated(ws: WebSocket, nodeId: string): boolean {
-    const node = this.nodes.get(nodeId);
-    if (!node || !node.passwordRequired) return true;
-    return this.authedBrowsers.get(ws)?.has(nodeId) ?? false;
-  }
-
-  markAuthenticated(ws: WebSocket, nodeId: string): void {
-    let set = this.authedBrowsers.get(ws);
-    if (!set) {
-      set = new Set();
-      this.authedBrowsers.set(ws, set);
-    }
-    set.add(nodeId);
   }
 
   // --- 目标解析（browser 消息：msg.nodeId || 自动选择）---
@@ -161,17 +139,12 @@ export class NodeRegistry {
 
   // --- 列表 / 查询 ---
 
-  isPasswordRequired(nodeId: string): boolean {
-    return this.nodes.get(nodeId)?.passwordRequired ?? false;
-  }
-
   listNodes(): NodeSummary[] {
     const out: NodeSummary[] = [];
     for (const [nodeId, info] of this.nodes) {
       out.push({
         nodeId,
         sessionCount: this.sessionCountOfNode(nodeId),
-        passwordRequired: info.passwordRequired,
         workspaceRoot: info.workspaceRoot,
       });
     }

@@ -12,7 +12,7 @@ console.error = (...args: unknown[]) => _error(`[${ts()}]`, ...args);
 console.warn = (...args: unknown[]) => _warn(`[${ts()}]`, ...args);
 
 import { start, onMessage, send } from './ws-client.js';
-import { NODE_ID, NODE_SECRET, NODE_PASSWORD, FORCE_PERMISSION_MODE, isDevMode, isNodePasswordEmpty, WORKSPACE_ROOT } from './config.js';
+import { NODE_ID, NODE_SECRET, FORCE_PERMISSION_MODE, isDevMode, WORKSPACE_ROOT } from './config.js';
 import {
   createSession,
   sendMessage,
@@ -227,18 +227,6 @@ onMessage((msg) => {
       break;
     }
 
-    case LocalCommandType.AuthNode: {
-      const password = msg.password;
-      if (!NODE_PASSWORD) {
-        reply({ type: LocalEventType.AuthResult, success: true });
-      } else if (password === NODE_PASSWORD) {
-        reply({ type: LocalEventType.AuthResult, success: true });
-      } else {
-        reply({ type: LocalEventType.AuthResult, success: false, error: '密码错误' });
-      }
-      break;
-    }
-
     case LocalCommandType.GetGitStatus: {
       const projectPath = msg.projectPath;
       const projectId = msg.projectId;
@@ -283,13 +271,10 @@ console.log('cc-web 本地服务已启动');
 if (isDevMode()) {
   console.warn('════════════════════════════════════════════════════════');
   console.warn('  [DEV MODE] 开发模式 (NODE_ENV != "production")');
-  if (isNodePasswordEmpty()) {
-    console.warn('  [INSECURE] NODE_PASSWORD 为空 — 无需密码认证即可执行命令');
-  }
   if (!WORKSPACE_ROOT) {
     console.warn('  [INSECURE] WORKSPACE_ROOT 为空 — 任意路径均可作为项目目录');
   }
-  console.warn('  公网部署时请设置 NODE_ENV=production 并配置密码和工作区');
+  console.warn('  公网部署时请设置 NODE_ENV=production 并配置工作区');
   console.warn('════════════════════════════════════════════════════════');
 }
 

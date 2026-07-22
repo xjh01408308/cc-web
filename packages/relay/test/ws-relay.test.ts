@@ -67,13 +67,12 @@ function makeHandler(): { handler: ConnectionHandler; store: NodeStore; assignme
 
 // 注册一个 local 节点：先在 nodeStore 预注册拿到明文 secret，再用它 register。
 // opts.nodeSecret 显式传值可模拟"错误 secret"；不传则用预注册生成正确 secret。
-function registerNode(store: NodeStore, m: MockWs, nodeId: string, opts: { passwordRequired?: boolean; nodeSecret?: string; workspaceRoot?: string } = {}): string {
+function registerNode(store: NodeStore, m: MockWs, nodeId: string, opts: { nodeSecret?: string; workspaceRoot?: string } = {}): string {
   const secret = store.createNode(nodeId).secret;
   sendMsg(m, {
     type: LocalEventType.Register,
     nodeId,
     nodeSecret: opts.nodeSecret ?? secret,
-    passwordRequired: opts.passwordRequired ?? false,
     workspaceRoot: opts.workspaceRoot,
   });
   return secret;
@@ -95,7 +94,7 @@ describe('ConnectionHandler', () => {
       h.handleBrowserConnection(browser.ws, '1.2.3.4');
       expect(browser.sent).toContainEqual({
         type: BrowserEventType.NodesList,
-        nodes: [{ nodeId: 'n1', sessionCount: 0, passwordRequired: false, workspaceRoot: '/a' }],
+        nodes: [{ nodeId: 'n1', sessionCount: 0, workspaceRoot: '/a' }],
       });
     });
 
@@ -144,16 +143,6 @@ describe('ConnectionHandler', () => {
       const browser = mockWs(); h.handleBrowserConnection(browser.ws, 'ip');
       sendMsg(browser, { type: BrowserCommandType.Chat, nodeId: 'gone', sessionId: 's1', text: 'hi' });
       expect(browser.sent).toContainEqual({ type: BrowserEventType.Error, error: '节点 gone 已离线' });
-    });
-
-    it('节点需密码 + admin browser → 直接转发 chat（Assignment 模型不再弹密码）', () => {
-      const { handler: h, store } = makeHandler();
-      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip'); registerNode(store, local, 'n1', { passwordRequired: true });
-      const browser = mockWs(); h.handleBrowserConnection(browser.ws, 'ip'); // 默认 admin session
-      sendMsg(browser, { type: BrowserCommandType.Chat, sessionId: 's1', text: 'hi' });
-      // admin 全放行：不再 AuthRequired，chat 直接到 local
-      expect(browser.sent.find((m) => (m as { type?: string }).type === 'auth_required')).toBeUndefined();
-      expect(local.sent.find((m) => (m as { type?: string }).type === 'chat')).toBeTruthy();
     });
   });
 
@@ -215,46 +204,6 @@ describe('ConnectionHandler', () => {
     it('无在线节点 → reject「没有在线的本地节点」', async () => {
       const { handler: h, store } = makeHandler();
       await expect(h.requestLocal({ type: 'list_projects' })).rejects.toThrow('没有在线的本地节点');
-    });
-  });
-
-  describe('AuthNode 超时重试（跨公网丢包容错）', () => {
-    it('5s 超时后重发一次 → local 收到两次 auth_node，浏览器尚未收到失败', () => {
-      const { handler: h, store } = makeHandler();
-      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip'); registerNode(store, local, 'n1', { passwordRequired: true });
-      const browser = mockWs(); h.handleBrowserConnection(browser.ws, 'ip');
-      browser.sent.length = 0; local.sent.length = 0;
-      sendMsg(browser, { type: BrowserCommandType.AuthNode, nodeId: 'n1', password: 'any' });
-      expect(local.sent.filter((m) => (m as { type?: string }).type === 'auth_node')).toHaveLength(1);
-      // local 一直不回 → 5s 后重发
-      vi.advanceTimersByTime(5000);
-      expect(local.sent.filter((m) => (m as { type?: string }).type === 'auth_node')).toHaveLength(2);
-      // 浏览器尚未收到 auth_result（重试窗口内不报失败）
-      expect(browser.sent.find((m) => (m as { type?: string }).type === 'auth_result')).toBeUndefined();
-    });
-
-    it('两次都超时 → 报"认证超时"（带 nodeId）', () => {
-      const { handler: h, store } = makeHandler();
-      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip'); registerNode(store, local, 'n1', { passwordRequired: true });
-      const browser = mockWs(); h.handleBrowserConnection(browser.ws, 'ip');
-      browser.sent.length = 0;
-      sendMsg(browser, { type: BrowserCommandType.AuthNode, nodeId: 'n1', password: 'any' });
-      vi.advanceTimersByTime(5000);  // 首次超时 → 重发
-      vi.advanceTimersByTime(5000);  // 二次超时 → 报失败
-      expect(browser.sent).toContainEqual({ type: BrowserEventType.AuthResult, nodeId: 'n1', success: false, error: '认证超时' });
-    });
-
-    it('首次丢包、重试时 local 回包 → 认证成功（迟到回包无害）', () => {
-      const { handler: h, store } = makeHandler();
-      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip'); registerNode(store, local, 'n1', { passwordRequired: true });
-      const browser = mockWs(); h.handleBrowserConnection(browser.ws, 'ip');
-      browser.sent.length = 0; local.sent.length = 0;
-      sendMsg(browser, { type: BrowserCommandType.AuthNode, nodeId: 'n1', password: 'any' });
-      const req = local.sent.find((m) => (m as { type?: string }).type === 'auth_node') as { _reqId?: string };
-      vi.advanceTimersByTime(5000);  // 首次超时 → 重发（同 _reqId）
-      // local 对重发的 auth_node 回成功
-      sendMsg(local, { type: LocalEventType.AuthResult, _reqId: req!._reqId, success: true });
-      expect(browser.sent).toContainEqual({ type: BrowserEventType.AuthResult, nodeId: 'n1', success: true });
     });
   });
 
@@ -350,7 +299,7 @@ describe('ConnectionHandler', () => {
     });
   });
 
-  describe('操作授权判定（Assignment，替代 NodeAuth isAuthenticated）', () => {
+  describe('操作授权判定（Assignment）', () => {
     const userSession: BrowserSession = { userId: 'u1', username: 'alice', role: 'user' };
     const adminSession: BrowserSession = { userId: 'a1', username: 'admin', role: 'admin' };
 

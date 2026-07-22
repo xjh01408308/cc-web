@@ -59,7 +59,6 @@ export const BrowserCommandType = {
   ListNodes: 'list_nodes',
   RetryWithPermission: 'retry_with_permission',
   ChangePermissionMode: 'change_permission_mode',
-  AuthNode: 'auth_node',
   GetGitStatus: 'get_git_status',
   GetGitDiff: 'get_git_diff',
   GetFileTree: 'get_file_tree',
@@ -137,12 +136,6 @@ export interface BrowserChangePermissionModeCommand {
   nodeId?: string;
 }
 
-export interface BrowserAuthNodeCommand {
-  type: typeof BrowserCommandType.AuthNode;
-  nodeId: string;
-  password: string;
-}
-
 export interface BrowserGetGitStatusCommand {
   type: typeof BrowserCommandType.GetGitStatus;
   projectPath: string;
@@ -185,7 +178,6 @@ export type BrowserCommand =
   | BrowserListNodesCommand
   | BrowserRetryWithPermissionCommand
   | BrowserChangePermissionModeCommand
-  | BrowserAuthNodeCommand
   | BrowserGetGitStatusCommand
   | BrowserGetGitDiffCommand
   | BrowserGetFileTreeCommand
@@ -206,7 +198,6 @@ export const LocalCommandType = {
   ListProjects: 'list_projects',
   RetryWithPermission: 'retry_with_permission',
   ChangePermissionMode: 'change_permission_mode',
-  AuthNode: 'auth_node',
   GetGitStatus: 'get_git_status',
   GetGitDiff: 'get_git_diff',
   GetFileTree: 'get_file_tree',
@@ -268,11 +259,6 @@ export interface LocalChangePermissionModeCommand {
   permissionMode: string;
 }
 
-export interface LocalAuthNodeCommand extends RequestEnvelope {
-  type: typeof LocalCommandType.AuthNode;
-  password: string;
-}
-
 export interface LocalGetGitStatusCommand extends RequestEnvelope {
   type: typeof LocalCommandType.GetGitStatus;
   projectPath: string;
@@ -309,7 +295,6 @@ export type LocalCommand =
   | LocalListProjectsCommand
   | LocalRetryWithPermissionCommand
   | LocalChangePermissionModeCommand
-  | LocalAuthNodeCommand
   | LocalGetGitStatusCommand
   | LocalGetGitDiffCommand
   | LocalGetFileTreeCommand
@@ -352,7 +337,6 @@ export const LocalEventType = {
   SessionsList: 'sessions_list',
   ProjectsList: 'projects_list',
   ProjectInfo: 'project_info',
-  AuthResult: 'auth_result',
   GitStatus: 'git_status',
   GitDiff: 'git_diff',
   FileTree: 'file_tree',
@@ -364,7 +348,6 @@ export interface LocalRegisterEvent {
   nodeId?: string;
   /** Node 注册凭证（每 Node 独立，由管理员预发生成）；替代已废弃的全局 RELAY_TOKEN（见 ADR-0004） */
   nodeSecret: string;
-  passwordRequired?: boolean;
   workspaceRoot?: string;
 }
 
@@ -426,13 +409,6 @@ export interface LocalProjectInfoEvent {
   _reqId?: string;
 }
 
-export interface LocalAuthResultEvent {
-  type: typeof LocalEventType.AuthResult;
-  success: boolean;
-  error?: string;
-  _reqId?: string;
-}
-
 export interface LocalGitStatusEvent {
   type: typeof LocalEventType.GitStatus;
   gitStatus: GitStatusResult;
@@ -470,7 +446,6 @@ export type LocalEvent =
   | LocalSessionsListEvent
   | LocalProjectsListEvent
   | LocalProjectInfoEvent
-  | LocalAuthResultEvent
   | LocalGitStatusEvent
   | LocalGitDiffEvent
   | LocalFileTreeEvent
@@ -483,7 +458,6 @@ export type LocalResponseEvent =
   | LocalSessionsListEvent
   | LocalProjectsListEvent
   | LocalProjectInfoEvent
-  | LocalAuthResultEvent
   | LocalGitStatusEvent
   | LocalGitDiffEvent
   | LocalFileTreeEvent
@@ -505,8 +479,6 @@ export const BrowserEventType = {
   ProjectInfo: 'project_info',
   NodesList: 'nodes_list',
   NodeSelected: 'node_selected',
-  AuthResult: 'auth_result',
-  AuthRequired: 'auth_required',
   GitStatus: 'git_status',
   GitDiff: 'git_diff',
   FileTree: 'file_tree',
@@ -581,20 +553,6 @@ export interface BrowserNodeSelectedEvent {
   nodeId: string;
 }
 
-export interface BrowserAuthResultEvent {
-  type: typeof BrowserEventType.AuthResult;
-  nodeId: string;
-  success: boolean;
-  error?: string;
-}
-
-/** relay 自产：节点需要密码，前端据此弹密码框 */
-export interface BrowserAuthRequiredEvent {
-  type: typeof BrowserEventType.AuthRequired;
-  nodeId: string;
-  message: string;
-}
-
 export interface BrowserGitStatusEvent {
   type: typeof BrowserEventType.GitStatus;
   gitStatus: GitStatusResult;
@@ -632,8 +590,6 @@ export type BrowserEvent =
   | BrowserProjectInfoEvent
   | BrowserNodesListEvent
   | BrowserNodeSelectedEvent
-  | BrowserAuthResultEvent
-  | BrowserAuthRequiredEvent
   | BrowserGitStatusEvent
   | BrowserGitDiffEvent
   | BrowserFileTreeEvent

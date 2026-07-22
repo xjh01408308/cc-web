@@ -1,6 +1,6 @@
 import { WebSocket } from 'ws';
 import { readFileSync } from 'node:fs';
-import { RELAY_URL, NODE_ID, NODE_SECRET, NODE_PASSWORD, WORKSPACE_ROOT, RECONNECT_DELAY, MAX_RECONNECT_DELAY, RELAY_CA_CERT } from './config.js';
+import { RELAY_URL, NODE_ID, NODE_SECRET, WORKSPACE_ROOT, RECONNECT_DELAY, MAX_RECONNECT_DELAY, RELAY_CA_CERT } from './config.js';
 import type { LocalCommand, LocalControl, LocalEvent } from './types.js';
 import { LocalEventType, LocalControlType } from './types.js';
 
@@ -58,7 +58,7 @@ function connect(): void {
     reconnectAttempt = 0;  // 连接成功后重置重连计数
 
     // 注册：带预注册凭证（nodeId + nodeSecret），替代已废弃的全局 RELAY_TOKEN
-    send({ type: LocalEventType.Register, nodeId: NODE_ID, nodeSecret: NODE_SECRET, passwordRequired: !!NODE_PASSWORD, workspaceRoot: WORKSPACE_ROOT });
+    send({ type: LocalEventType.Register, nodeId: NODE_ID, nodeSecret: NODE_SECRET, workspaceRoot: WORKSPACE_ROOT });
   });
 
   ws.on('message', (raw) => {

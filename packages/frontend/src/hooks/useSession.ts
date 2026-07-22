@@ -3,7 +3,7 @@ import { BrowserCommandType } from "../types";
 import type { BrowserCommand, SessionInfo, ProjectInfo, NodeInfo } from "../types";
 
 // 会话实体域：节点列表 / 项目 / 会话 CRUD + 当前选中节点/项目/会话。
-// nodes/activeNodeId 归此处（PR-5 决定，useNodeAuth 注释 L10-12 引用此处）。
+// nodes/activeNodeId 归此处。
 // 与 useChat（当前对话流）分开 —— Session 是会话实体 CRUD，Chat 是当前对话流；
 // 高耦合通过协调层解（见 ADR 0002）。
 //

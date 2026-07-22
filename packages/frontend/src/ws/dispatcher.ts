@@ -21,7 +21,6 @@ import { BrowserEventType } from "../types";
 import type { StreamingContext } from "../hooks/streaming/useStreamParser";
 import { UnifiedMessageProcessor } from "../utils/UnifiedMessageProcessor";
 import { dedupConsecutiveAssistant } from "../utils/dedupMessages";
-import { loadLastView, removeNodePassword } from "../utils/localStorage";
 
 // ---- 进度统计 / 浏览态形状（与 ChatView 内联类型对齐；T-B 时提取共享）----
 
@@ -79,15 +78,10 @@ export interface DispatchContext {
   currentAssistantMessageRef: MutableRefObject<ChatMessage | null>;
   pendingSessionRef: MutableRefObject<string | null>;
   creatingNewSessionRef: MutableRefObject<boolean>;
-  autoAuthTimeoutRef: MutableRefObject<ReturnType<typeof setTimeout> | null>;
 
-  // 节点 / 认证 setter
+  // 节点 setter
   setNodes: Dispatch<SetStateAction<NodeInfo[]>>;
   setActiveNodeId: Dispatch<SetStateAction<string | null>>;
-  setAuthenticatedNodes: Dispatch<SetStateAction<Set<string>>>;
-  setPendingAuthNodeId: Dispatch<SetStateAction<string | null>>;
-  setAuthError: Dispatch<SetStateAction<string | null>>;
-  setAutoAuthInProgress: Dispatch<SetStateAction<boolean>>;
 
   // 项目 / 会话 setter
   setProjects: Dispatch<SetStateAction<ProjectInfo[]>>;
@@ -117,8 +111,6 @@ export interface DispatchContext {
 // ---- per-type 事件窄化别名 ----
 
 type NodesListEvent = Extract<BrowserEvent, { type: typeof BrowserEventType.NodesList }>;
-type AuthResultEvent = Extract<BrowserEvent, { type: typeof BrowserEventType.AuthResult }>;
-type AuthRequiredEvent = Extract<BrowserEvent, { type: typeof BrowserEventType.AuthRequired }>;
 type ProjectsListEvent = Extract<BrowserEvent, { type: typeof BrowserEventType.ProjectsList }>;
 type ProjectInfoEvent = Extract<BrowserEvent, { type: typeof BrowserEventType.ProjectInfo }>;
 type SessionInfoEvent = Extract<BrowserEvent, { type: typeof BrowserEventType.SessionInfo }>;
@@ -139,11 +131,9 @@ type StreamingEvent = Extract<
 >;
 
 // 早期处理类：在 nodeId 过滤之前处理（不附带业务 nodeId，或语义上属于全局）。
-// 与原 handleRawMessage 一致：NodesList / AuthResult / AuthRequired 在 nodeId 过滤分支之前。
+// 与原 handleRawMessage 一致：NodesList 在 nodeId 过滤分支之前。
 const EARLY_TYPES: ReadonlySet<BrowserEvent["type"]> = new Set([
   BrowserEventType.NodesList,
-  BrowserEventType.AuthResult,
-  BrowserEventType.AuthRequired,
 ]);
 
 /** 附带 nodeId 且与当前选中节点不匹配时跳过。activeNodeId 为 null 时不过滤（全收）。 */
@@ -158,7 +148,7 @@ function shouldSkipByNodeId(event: BrowserEvent, activeNodeId: string | null): b
  * 处理一条已解析的 BrowserEvent。
  *
  * 行为与原 ChatView.handleRawMessage 的 for-loop body 逐分支等价：
- *   1. 早期处理 NodesList / AuthResult / AuthRequired（不经 nodeId 过滤）
+ *   1. 早期处理 NodesList（不经 nodeId 过滤）
  *   2. nodeId 过滤（附带 nodeId 且 ≠ activeNodeId → 跳过）
  *   3. 其余 type 穷尽分发
  *
@@ -172,12 +162,6 @@ export function dispatchBrowserEvent(event: BrowserEvent, ctx: DispatchContext):
   switch (event.type) {
     case BrowserEventType.NodesList:
       handleNodesList(event, ctx);
-      return;
-    case BrowserEventType.AuthResult:
-      handleAuthResult(event, ctx);
-      return;
-    case BrowserEventType.AuthRequired:
-      handleAuthRequired(event, ctx);
       return;
     case BrowserEventType.ProjectsList:
       handleProjectsList(event, ctx);
@@ -233,50 +217,6 @@ function handleNodesList(event: NodesListEvent, ctx: DispatchContext): void {
   } else if (nodeList.length === 0) {
     ctx.setActiveNodeId(null);
   }
-}
-
-function handleAuthResult(event: AuthResultEvent, ctx: DispatchContext): void {
-  const resultNodeId = event.nodeId;
-  if (event.success) {
-    ctx.setAuthenticatedNodes((prev) => {
-      const next = new Set(prev);
-      next.add(resultNodeId);
-      return next;
-    });
-    ctx.setPendingAuthNodeId(null);
-    ctx.setAuthError(null);
-    ctx.setAutoAuthInProgress(false);
-    if (ctx.autoAuthTimeoutRef.current) {
-      clearTimeout(ctx.autoAuthTimeoutRef.current);
-      ctx.autoAuthTimeoutRef.current = null;
-    }
-    // 确保 pendingSessionRef 已设置（初始加载自动认证时）
-    if (!ctx.pendingSessionRef.current) {
-      const saved = loadLastView();
-      if (saved?.sessionId && saved.nodeId === resultNodeId) {
-        ctx.pendingSessionRef.current = saved.sessionId;
-      }
-    }
-  } else {
-    // 仅"密码错误"才删保存密码；"认证超时"/速率限制等多为跨公网链路瞬时丢包，
-    // 密码本身可能没错 —— 删了会导致下次刷新无法自动认证（问题自我加重）。
-    if (event.error === "密码错误") {
-      removeNodePassword(resultNodeId);
-    }
-    ctx.setAutoAuthInProgress(false);
-    if (ctx.autoAuthTimeoutRef.current) {
-      clearTimeout(ctx.autoAuthTimeoutRef.current);
-      ctx.autoAuthTimeoutRef.current = null;
-    }
-    ctx.setAuthError(event.error || "认证失败");
-  }
-}
-
-function handleAuthRequired(event: AuthRequiredEvent, ctx: DispatchContext): void {
-  if (!event.nodeId) return;
-  ctx.setPendingAuthNodeId(event.nodeId);
-  ctx.setIsLoading(false);
-  ctx.setTaskProgress(null);
 }
 
 function handleProjectsList(event: ProjectsListEvent, ctx: DispatchContext): void {

@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 
-// 浏览器层认证（用户名 + 密码登录，httpOnly cookie session）。与节点层认证（useNodeAuth，PR-5）
-// 是两套独立 state，不合 useAuth —— "auth" 是 overloaded 词，见 CONTEXT.md。
+// 浏览器层认证（用户名 + 密码登录，httpOnly cookie session）。
+// "auth" 是 overloaded 词，见 CONTEXT.md（Node 操作授权另见 Assignment）。
 
 /** 当前登录用户身份（来自 /api/session 或 /api/login 回传）。admin 入口、/admin 守卫据此判断角色。 */
 export interface CurrentUser {
@@ -36,10 +36,7 @@ export function useBrowserAuth() {
   const authFetch = useCallback(async (url: string, init?: RequestInit) => {
     const resp = await fetch(url, { credentials: 'include', ...init });
     if (resp.status === 401) {
-      // 区分两种 401：节点密码拦截（auth_required）透传 response 给调用方弹节点密码框；
-      // 仅 session 失效（未认证）才清登录态回登录页。
-      const data = await resp.clone().json().catch(() => null) as { error?: string } | null;
-      if (data?.error === 'auth_required') return resp;
+      // session 失效（未认证）→ 清登录态回登录页
       clearSession();
       throw new Error('SESSION_EXPIRED');
     }

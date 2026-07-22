@@ -4,7 +4,6 @@ import { BrowserCommandType } from "../types";
 import { useWebSocket } from "../hooks/useWebSocket";
 import { useStreamParser } from "../hooks/streaming/useStreamParser";
 import { useBrowserAuth } from "../hooks/useBrowserAuth";
-import { useNodeAuth } from "../hooks/useNodeAuth";
 import { useUi } from "../hooks/useUi";
 import { useFileBrowser } from "../hooks/useFileBrowser";
 import { useSession } from "../hooks/useSession";
@@ -90,20 +89,6 @@ export function ChatView() {
     resetForSessionChange,
   } = useChat();
   const {
-    authenticatedNodes, setAuthenticatedNodes,
-    pendingAuthNodeId, setPendingAuthNodeId,
-    authError, setAuthError,
-    autoAuthInProgress, setAutoAuthInProgress,
-    autoAuthTimeoutRef,
-    tryAutoAuth, handleAuthNode,
-  } = useNodeAuth({ send, connected });
-
-  // HTTP 401 auth_required 响应可能晚于 WS 自动认证到达 —— 读最新认证态避免过时 401
-  // 重新触发弹窗（auth_required 回调闭包不含 authenticatedNodes，须用 ref）
-  const authenticatedNodesRef = useRef(authenticatedNodes);
-  authenticatedNodesRef.current = authenticatedNodes;
-
-  const {
     gitStatuses, setGitStatuses,
     diffState, setDiffState,
     fileTrees, setFileTrees,
@@ -143,31 +128,17 @@ export function ChatView() {
           authFetch(`/api/projects?nodeId=${encodeURIComponent(restoreNodeId)}`)
             .then((r) => r.json())
             .then((projData) => {
-              if ((projData as { error?: string }).error === 'auth_required') {
-                // WS 认证可能已在此 HTTP 响应到达前完成 —— 已认证则忽略过时 401
-                if (!authenticatedNodesRef.current.has(restoreNodeId)) {
-                  setPendingAuthNodeId(restoreNodeId);
-                }
-                return;
-              }
               setProjects(projData as ProjectInfo[]);
             })
             .catch(() => {});
           authFetch(`/api/sessions?nodeId=${encodeURIComponent(restoreNodeId)}`)
             .then((r) => r.json())
-            .then((sessData: SessionInfo[] | { error?: string }) => {
-              if ('error' in sessData && sessData.error === 'auth_required') {
-                if (!authenticatedNodesRef.current.has(restoreNodeId)) {
-                  setPendingAuthNodeId(restoreNodeId);
-                }
-                return;
-              }
-              const sessions = sessData as SessionInfo[];
-              setSessions(sessions);
+            .then((sessData: SessionInfo[]) => {
+              setSessions(sessData);
               // 恢复上次的会话（含历史消息）
               pendingSessionRef.current = null;
               if (saved?.sessionId) {
-                const target = sessions.find((s) => s.sessionId === saved.sessionId);
+                const target = sessData.find((s) => s.sessionId === saved.sessionId);
                 if (target) {
                   setActiveSessionId(target.sessionId);
                   setActiveProjectId(target.projectId);
@@ -228,7 +199,7 @@ export function ChatView() {
     }
   }, [activeNodeId, activeProjectId, activeSessionId, sessions, projects]);
 
-  // 节点认证成功后加载项目和会话（仅当 HTTP 未返回数据时通过 WS 补充加载）
+  // 节点选中后通过 WS 加载项目和会话（HTTP 未返回数据时的补充路径；切换节点时也走此）
   // 不用 loadedNodesRef 防重 —— 因为 send() 在 WS 未 OPEN 时会静默丢弃，
   // 如果首次被丢弃，后续重连必须能重新请求。用 projects/sessions 是否为空来判断是否需要加载。
   const projectsRef = useRef(projects);
@@ -239,15 +210,7 @@ export function ChatView() {
   const loadRetryCountRef = useRef(0);
 
   useEffect(() => {
-    if (activeNodeId && authenticatedNodes.has(activeNodeId) && connected) {
-      // 确保 pendingSessionRef 已设置（初始加载自动认证时）
-      if (!pendingSessionRef.current) {
-        const saved = loadLastView();
-        if (saved?.sessionId && saved.nodeId === activeNodeId) {
-          pendingSessionRef.current = saved.sessionId;
-        }
-      }
-
+    if (activeNodeId && connected) {
       const needProjects = projectsRef.current.length === 0;
       const needSessions = sessionsRef.current.length === 0;
 
@@ -276,7 +239,7 @@ export function ChatView() {
         loadRetryRef.current = null;
       }
     };
-  }, [activeNodeId, authenticatedNodes, connected, send]);
+  }, [activeNodeId, connected, send]);
 
   // 处理一条 WebSocket 原始消息
   const handleRawMessage = useCallback(
@@ -294,13 +257,8 @@ export function ChatView() {
             currentAssistantMessageRef,
             pendingSessionRef,
             creatingNewSessionRef,
-            autoAuthTimeoutRef,
             setNodes,
             setActiveNodeId,
-            setAuthenticatedNodes,
-            setPendingAuthNodeId,
-            setAuthError,
-            setAutoAuthInProgress,
             setProjects,
             setSessions,
             setActiveSessionId,
@@ -344,60 +302,20 @@ export function ChatView() {
       resetForSessionChange();
       setProjects([]);
       setSessions([]);
-      setAuthError(null);
-      setAutoAuthInProgress(false);
-
-      const node = nodes.find((n) => n.nodeId === nodeId);
-
-      if (node?.passwordRequired && !authenticatedNodes.has(nodeId)) {
-        if (!tryAutoAuth(nodeId)) {
-          setPendingAuthNodeId(nodeId);
-        }
-        return;
-      }
-
-      setPendingAuthNodeId(null);
 
       // 加载该节点的项目和会话
       authFetch(`/api/projects?nodeId=${encodeURIComponent(nodeId)}`)
         .then((r) => r.json())
-        .then((data) => {
-          if ((data as { error?: string }).error === 'auth_required') {
-            if (!authenticatedNodesRef.current.has(nodeId)) {
-              setPendingAuthNodeId(nodeId);
-            }
-            return;
-          }
-          setProjects(data as ProjectInfo[]);
-        })
+        .then((data) => setProjects(data as ProjectInfo[]))
         .catch(() => {});
 
       authFetch(`/api/sessions?nodeId=${encodeURIComponent(nodeId)}`)
         .then((r) => r.json())
-        .then((data) => {
-          if ((data as { error?: string }).error === 'auth_required') {
-            if (!authenticatedNodesRef.current.has(nodeId)) {
-              setPendingAuthNodeId(nodeId);
-            }
-            return;
-          }
-          setSessions(data as SessionInfo[]);
-        })
+        .then((data) => setSessions(data as SessionInfo[]))
         .catch(() => {});
     },
-    [nodes, authenticatedNodes, tryAutoAuth],
+    [authFetch],
   );
-
-  // 自动选中节点（单节点场景）后，若该节点需要密码且未认证，触发认证流程
-  useEffect(() => {
-    if (!activeNodeId || !connected || autoAuthInProgress || pendingAuthNodeId) return;
-    const node = nodes.find((n) => n.nodeId === activeNodeId);
-    if (node?.passwordRequired && !authenticatedNodes.has(activeNodeId)) {
-      if (!tryAutoAuth(activeNodeId)) {
-        setPendingAuthNodeId(activeNodeId);
-      }
-    }
-  }, [activeNodeId, nodes, connected, authenticatedNodes, autoAuthInProgress, pendingAuthNodeId, tryAutoAuth]);
 
   const handleDeleteSession = useCallback(
     (sessionId: string) => {
@@ -705,9 +623,7 @@ export function ChatView() {
             <span className="text-xs text-amber-600 dark:text-amber-400">无节点在线</span>
           ) : nodes.length === 1 ? (
             <span className="text-xs text-emerald-600 dark:text-emerald-400">
-              {nodes[0].passwordRequired && !authenticatedNodes.has(nodes[0].nodeId) ? '\u{1F512} ' : ''}
               {nodes[0].nodeId}
-              {authenticatedNodes.has(nodes[0].nodeId) ? ' ✓' : ''}
             </span>
           ) : (
             <select
@@ -718,9 +634,7 @@ export function ChatView() {
               <option value="" disabled>选择节点</option>
               {nodes.map((n) => (
                 <option key={n.nodeId} value={n.nodeId}>
-                  {n.passwordRequired && !authenticatedNodes.has(n.nodeId) ? '\u{1F512} ' : ''}
                   {n.nodeId} ({n.sessionCount} 会话)
-                  {authenticatedNodes.has(n.nodeId) ? ' ✓' : ''}
                 </option>
               ))}
             </select>
@@ -765,58 +679,6 @@ export function ChatView() {
             </a>
           )}
         </div>
-        {pendingAuthNodeId && !autoAuthInProgress && (
-          <div className="flex items-center justify-center py-4 px-2 flex-shrink-0">
-            <div className="bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600 rounded-lg p-4 w-full max-w-sm shadow-lg">
-              <div className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-3">
-                节点 {pendingAuthNodeId} 需要密码认证
-              </div>
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  const input = (e.target as HTMLFormElement).querySelector('input');
-                  if (input) {
-                    handleAuthNode(pendingAuthNodeId, input.value);
-                    input.value = '';
-                  }
-                }}
-              >
-                <input
-                  type="password"
-                  placeholder="请输入节点密码"
-                  autoFocus
-                  className="w-full px-3 py-2 text-sm border border-slate-300 dark:border-slate-600 rounded-md bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 mb-2"
-                />
-                {authError && (
-                  <div className="text-xs text-red-500 mb-2">{authError}</div>
-                )}
-                <div className="flex gap-2">
-                  <button
-                    type="submit"
-                    className="flex-1 px-3 py-1.5 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors"
-                  >
-                    认证
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setPendingAuthNodeId(null);
-                      setAuthError(null);
-                      setAutoAuthInProgress(false);
-                      if (autoAuthTimeoutRef.current) {
-                        clearTimeout(autoAuthTimeoutRef.current);
-                        autoAuthTimeoutRef.current = null;
-                      }
-                    }}
-                    className="px-3 py-1.5 text-sm border border-slate-300 dark:border-slate-600 text-slate-600 dark:text-slate-400 rounded-md hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
-                  >
-                    取消
-                  </button>
-                </div>
-              </form>
-            </div>
-          </div>
-        )}
         <ChatMessages messages={messages} isLoading={isLoading} />
         <StatusBar
           connected={connected}

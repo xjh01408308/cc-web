@@ -4,7 +4,7 @@ import type { NodeSummary } from '../src/node-registry.js';
 import type { UserRole } from '../src/user-store.js';
 
 function node(nodeId: string): NodeSummary {
-  return { nodeId, sessionCount: 0, passwordRequired: false };
+  return { nodeId, sessionCount: 0 };
 }
 
 const ONLINE = [node('n1'), node('n2'), node('n3')];
