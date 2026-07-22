@@ -72,34 +72,42 @@
 
 ### 配置文件
 
-复制 `.env.example` 为 `.env`，按需修改：
+配置按端拆分到各自包内（`packages/relay/.env` 与 `packages/local/.env`），分别复制模板后修改：
 
 ```bash
-cp .env.example .env
+cp packages/relay/.env.example packages/relay/.env
+cp packages/local/.env.example packages/local/.env
 ```
 
-`.env` 文件内容（带注释）：
+`packages/relay/.env`（中继服务）：
 
 ```bash
-# ----- 中继服务 (packages/relay) -----
+NODE_ENV=production
 RELAY_PORT=3001                 # 监听端口
-RELAY_TOKEN=<随机字符串>         # 本地服务注册认证 token（生产必须修改）
-RELAY_BROWSER_TOKEN=<随机字符串> # 浏览器 WebSocket 认证 token（生产必须设置）
+RELAY_TOKEN=<随机字符串>         # 本地服务注册认证 token（须与 local 端一致，生产必须修改）
+RELAY_PASSWORD=<访问密码>        # 浏览器 /api/login 登录密码（生产强烈建议设置）
 STATIC_DIR=../../frontend/dist  # 前端静态文件路径
+```
 
-# ----- 本地服务 (packages/local) -----
+`packages/local/.env`（本地服务）：
+
+```bash
 # 同机器部署（推荐）: ws://127.0.0.1:3001/ws/local
 # 跨机器部署（需 nginx 代理 WSS）: wss://your-domain.com/ws/local
 RELAY_URL=ws://127.0.0.1:3001/ws/local
-NODE_ID=                    # 节点标识（留空自动取 hostname）
-NODE_PASSWORD=              # 节点登录密码（留空不启用认证）
-RECONNECT_DELAY=2000        # 重连初始延迟（毫秒）
-MAX_RECONNECT_DELAY=30000   # 重连最大延迟（毫秒）
-
-# ----- 前端 (packages/frontend) -----
-VITE_BROWSER_TOKEN=<与 RELAY_BROWSER_TOKEN 一致>  # 浏览器 WebSocket token
-# VITE_WS_URL 留空即可，前端会根据页面协议自动选择 ws/wss
+RELAY_TOKEN=<与 relay 端一致>     # 注册认证 token（须与 relay 端相同）
+RELAY_CA_CERT=                  # wss 自签名证书 CA 路径（留空用系统 CA）
+NODE_ID=                        # 节点标识（留空自动取 hostname）
+NODE_PASSWORD=                  # 节点登录密码（留空不启用认证）
+WORKSPACE_ROOT=                 # 项目工作区根目录（留空不限制路径）
+RECONNECT_DELAY=2000            # 重连初始延迟（毫秒）
+MAX_RECONNECT_DELAY=30000       # 重连最大延迟（毫秒）
+CLAUDE_FORCE_PERMISSION_MODE=   # 强制锁定权限模式（留空以前端为准）
 ```
+
+> `RELAY_TOKEN` 在两端必须取相同值，否则 local 注册会被 relay 拒绝。
+>
+> 前端（`packages/frontend`）由 Vite 自动加载其包内 `.env`，`VITE_WS_URL` 留空即可（前端按页面协议自动选择 ws/wss）。
 
 ### 一体机（本地开发 / 演示）
 
@@ -118,12 +126,10 @@ restart.bat
 **云服务器上**（启动 relay + frontend）：
 
 ```bash
-# 1. 配置 .env
+# 1. 配置 packages/relay/.env
 #    NODE_ENV=production
 #    RELAY_TOKEN=<强随机字符串>
-#    RELAY_BROWSER_TOKEN=<强随机字符串>
-#    VITE_BROWSER_TOKEN=<同上>
-#    RELAY_URL=ws://127.0.0.1:3001/ws/local  (local 和 relay 同机器时)
+#    RELAY_PASSWORD=<访问密码>
 
 # 2. 构建前端 & 启动
 npm run build:frontend
@@ -152,7 +158,7 @@ sudo nginx -t && sudo systemctl reload nginx
 **远程开发机上**（仅启动 local，连到云服务）：
 
 ```bash
-# 1. 修改 .env：
+# 1. 修改 packages/local/.env：
 #    RELAY_URL=wss://your-domain.com/ws/local  (跨机器必须走 WSS)
 #    RELAY_TOKEN=与云服务一致的值
 # 2. 启动
@@ -301,13 +307,12 @@ data/sessions/
 ## 部署到云服务器
 
 ```bash
-# 1. 上传整个项目（或至少 packages/relay + packages/frontend + .env + restart-cloud.sh）
+# 1. 上传整个项目（或至少 packages/relay + packages/frontend + restart-cloud.sh）
 
-# 2. 配置 .env
+# 2. 配置 packages/relay/.env
 #    NODE_ENV=production
 #    RELAY_TOKEN=<强随机字符串>
-#    RELAY_BROWSER_TOKEN=<强随机字符串>
-#    VITE_BROWSER_TOKEN=<同上>
+#    RELAY_PASSWORD=<访问密码>
 #    RELAY_PORT=3001
 
 # 3. 安装依赖、构建前端、启动
@@ -326,7 +331,7 @@ sudo nginx -t && sudo systemctl reload nginx
 
 ```bash
 # 本地开发机上
-# 1. 修改 .env：
+# 1. 修改 packages/local/.env：
 #    RELAY_URL=wss://your-domain.com/ws/local  (跨机器走 WSS)
 #    RELAY_TOKEN=与云服务一致的值
 # 2. 确保已安装 claude CLI 并可用

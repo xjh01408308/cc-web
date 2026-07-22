@@ -19,7 +19,7 @@ npx vite build
 echo ""
 echo "[3/3] 启动服务..."
 cd "$SCRIPT_DIR/packages/relay"
-nohup npx tsx --env-file=../../.env src/index.ts > "$PID_DIR/relay.log" 2>&1 &
+nohup npx tsx --env-file=.env src/index.ts > "$PID_DIR/relay.log" 2>&1 &
 echo "$!" > "$PID_DIR/relay.pid"
 
 sleep 1

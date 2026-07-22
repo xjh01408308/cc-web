@@ -24,13 +24,13 @@ npx vite build
 echo ""
 echo "[3/4] 启动中继服务 (端口 3001)..."
 cd "$SCRIPT_DIR/packages/relay"
-npx tsx --env-file=../../.env src/index.ts &
+npx tsx --env-file=.env src/index.ts &
 sleep 1
 
 echo ""
 echo "[4/4] 启动本地服务 + 前端 (端口 5173)..."
 cd "$SCRIPT_DIR/packages/local"
-npx tsx --env-file=../../.env src/index.ts &
+npx tsx --env-file=.env src/index.ts &
 sleep 1
 
 cd "$SCRIPT_DIR/packages/frontend"
