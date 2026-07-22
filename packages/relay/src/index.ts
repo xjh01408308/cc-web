@@ -20,6 +20,8 @@ import { RELAY_PORT, RELAY_BROWSER_TOKEN, STATIC_DIR, INITIAL_ADMIN_USER, INITIA
 import { serveStatic } from './static.js';
 import { handleBrowserConnection, handleLocalConnection, requestLocal, getOnlineNodes, isNodePasswordRequired } from './ws-relay.js';
 import { UserStore, DEFAULT_USER_DB_PATH, type UserRole } from './user-store.js';
+import { handleAdminUsersRoute } from './admin-routes.js';
+import { jsonResponse, readBody } from './http-utils.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const staticDir = path.resolve(__dirname, STATIC_DIR);
@@ -49,33 +51,12 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000);
 
-function jsonResponse(res: http.ServerResponse, data: unknown, status = 200): void {
-  if (status >= 400) {
-    console.warn(`HTTP ${status}: ${(data as { error?: string })?.error || 'unknown'}`);
-  }
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (isDevMode()) {
-    headers['Access-Control-Allow-Origin'] = '*';
-  }
-  res.writeHead(status, headers);
-  res.end(JSON.stringify(data));
-}
-
 function getQueryParam(req: http.IncomingMessage, name: string): string | undefined {
   const url = req.url || '';
   const idx = url.indexOf('?');
   if (idx === -1) return undefined;
   const params = new URLSearchParams(url.slice(idx));
   return params.get(name) || undefined;
-}
-
-function readBody(req: http.IncomingMessage): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    req.on('data', (chunk: Buffer) => chunks.push(chunk));
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
-    req.on('error', reject);
-  });
 }
 
 const SESSION_COOKIE = 'cc_web_session';
@@ -137,12 +118,19 @@ const server = http.createServer(async (req, res) => {
     const headers: Record<string, string> = { 'Access-Control-Max-Age': '86400' };
     if (isDevMode()) {
       headers['Access-Control-Allow-Origin'] = '*';
-      headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS';
+      headers['Access-Control-Allow-Methods'] = 'GET, POST, DELETE, OPTIONS';
       headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization';
     }
     res.writeHead(204, headers);
     res.end();
     return;
+  }
+
+  // /api/admin/* —— 管理路由骨架（issue #22）：解析 session 后委托给 admin-routes，
+  // 守卫（401/403）与 CRUD 逻辑均在其内，供后续 Node 管理 / Assignment 授权复用。
+  if (req.url?.startsWith('/api/admin/')) {
+    const handled = await handleAdminUsersRoute(req, res, { session: getSession(req), userStore });
+    if (handled) return;
   }
 
   // 登录端点：用户名 + 密码查 users 表（scrypt 校验），通过后下发 httpOnly cookie。
@@ -158,7 +146,7 @@ const server = http.createServer(async (req, res) => {
         const token = randomBytes(32).toString('hex');
         sessionTokens.set(token, { userId: user.id, username: user.username, role: user.role, createdAt: Date.now() });
         setSessionCookie(res, token, req);
-        jsonResponse(res, { ok: true });
+        jsonResponse(res, { ok: true, user: { username: user.username, role: user.role } });
       } else {
         jsonResponse(res, { error: '用户名或密码错误' }, 401);
       }

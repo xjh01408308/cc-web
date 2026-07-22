@@ -99,3 +99,62 @@ describe('UserStore — 密码哈希', () => {
     expect(store.authenticate('b', 'same-pw')).toBeTruthy();
   });
 });
+
+// admin 管理普通用户（issue #22）：listUsers / getUserById / resetPassword / deleteUser。
+describe('UserStore — admin CRUD（issue #22）', () => {
+  it('listUsers 返回所有用户，不含 password_hash，字段为 camelCase', () => {
+    const store = makeStore();
+    store.seedInitialAdmin('admin', 'secret');
+    store.createUser('alice', 'pw1', 'user');
+    store.createUser('bob', 'pw2', 'user');
+
+    const list = store.listUsers();
+    expect(list).toHaveLength(3);
+    expect(list.map((u) => u.username).sort()).toEqual(['admin', 'alice', 'bob']);
+    for (const u of list) {
+      expect(u).not.toHaveProperty('password_hash');
+      expect(u).not.toHaveProperty('passwordHash');
+      expect(typeof u.createdAt).toBe('number');
+      expect(['admin', 'user']).toContain(u.role);
+    }
+  });
+
+  it('getUserById 命中 → 返回 UserRow；未命中 → undefined', () => {
+    const store = makeStore();
+    const created = store.createUser('alice', 'pw', 'user');
+    expect(store.getUserById(created.id)?.username).toBe('alice');
+    expect(store.getUserById('nope')).toBeUndefined();
+  });
+
+  it('resetPassword 用新密码覆写哈希，旧密码失效、新密码可用', () => {
+    const store = makeStore();
+    const u = store.createUser('alice', 'old-pw', 'user');
+    expect(store.resetPassword(u.id, 'new-pw')).toBe(true);
+
+    expect(store.authenticate('alice', 'old-pw')).toBeNull();
+    expect(store.authenticate('alice', 'new-pw')).toBeTruthy();
+  });
+
+  it('resetPassword 未命中 → 返回 false，不抛错', () => {
+    const store = makeStore();
+    expect(store.resetPassword('nope', 'pw')).toBe(false);
+  });
+
+  it('deleteUser 移除用户，之后 authenticate 失败、countUsers 递减', () => {
+    const store = makeStore();
+    store.seedInitialAdmin('admin', 'secret');
+    const u = store.createUser('alice', 'pw', 'user');
+    expect(store.countUsers()).toBe(2);
+
+    expect(store.deleteUser(u.id)).toBe(true);
+    expect(store.countUsers()).toBe(1);
+    expect(store.authenticate('alice', 'pw')).toBeNull();
+    // admin 仍在
+    expect(store.authenticate('admin', 'secret')).toBeTruthy();
+  });
+
+  it('deleteUser 未命中 → 返回 false', () => {
+    const store = makeStore();
+    expect(store.deleteUser('nope')).toBe(false);
+  });
+});
