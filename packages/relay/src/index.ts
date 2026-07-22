@@ -16,11 +16,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import { WebSocketServer } from 'ws';
-import { RELAY_PORT, RELAY_BROWSER_TOKEN, STATIC_DIR, INITIAL_ADMIN_USER, INITIAL_ADMIN_PASSWORD, isDevMode, isUsingDefaultRelayToken } from './config.js';
+import { RELAY_PORT, RELAY_BROWSER_TOKEN, STATIC_DIR, INITIAL_ADMIN_USER, INITIAL_ADMIN_PASSWORD, isDevMode } from './config.js';
 import { serveStatic } from './static.js';
-import { handleBrowserConnection, handleLocalConnection, requestLocal, getOnlineNodes, isNodePasswordRequired } from './ws-relay.js';
+import { handleBrowserConnection, handleLocalConnection, requestLocal, getOnlineNodes, isNodePasswordRequired, initRelay } from './ws-relay.js';
 import { UserStore, DEFAULT_USER_DB_PATH, type UserRole } from './user-store.js';
-import { handleAdminUsersRoute } from './admin-routes.js';
+import { NodeStore, DEFAULT_NODE_DB_PATH } from './node-store.js';
+import { handleAdminUsersRoute, handleAdminNodesRoute } from './admin-routes.js';
 import { jsonResponse, readBody } from './http-utils.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -31,6 +32,13 @@ const staticDir = path.resolve(__dirname, STATIC_DIR);
 const userStore = new UserStore(DEFAULT_USER_DB_PATH);
 const seedResult = userStore.seedInitialAdmin(INITIAL_ADMIN_USER, INITIAL_ADMIN_PASSWORD);
 if (seedResult.seeded) console.log(`[relay] 已创建首个管理员账户: ${seedResult.username}`);
+
+// ---- Node 预注册表（local 注册凭证，见 ADR-0004）----
+// 同库不同表（nodes）。管理员在 /admin 预注册 Node 生成 (nodeId, nodeSecret)；local register 据此校验。
+const nodeStore = new NodeStore(DEFAULT_NODE_DB_PATH);
+
+// 把 nodeStore 注入连接处理单例（必须在 server.listen / 任何 WS 连接前完成）。
+initRelay(nodeStore);
 
 // ---- Session Token 管理 ----
 // token → session。session 携带当前登录用户身份（userId / username / role），
@@ -126,11 +134,12 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // /api/admin/* —— 管理路由骨架（issue #22）：解析 session 后委托给 admin-routes，
-  // 守卫（401/403）与 CRUD 逻辑均在其内，供后续 Node 管理 / Assignment 授权复用。
+  // /api/admin/* —— 管理路由（issue #22 用户 / #23 Node）：解析 session 后依次委托，
+  // 守卫（401/403）与 CRUD 逻辑均在 admin-routes 内。各处理器返回 true 表已处理。
   if (req.url?.startsWith('/api/admin/')) {
-    const handled = await handleAdminUsersRoute(req, res, { session: getSession(req), userStore });
-    if (handled) return;
+    const session = getSession(req);
+    if (await handleAdminUsersRoute(req, res, { session, userStore })) return;
+    if (await handleAdminNodesRoute(req, res, { session, nodeStore })) return;
   }
 
   // 登录端点：用户名 + 密码查 users 表（scrypt 校验），通过后下发 httpOnly cookie。
@@ -302,10 +311,8 @@ server.listen(RELAY_PORT, '127.0.0.1', () => {
     console.warn('════════════════════════════════════════════════════════');
     console.warn('  [DEV MODE] 开发模式 (NODE_ENV != "production")');
     console.warn('  [DEV MODE] 浏览器登录已旁路（synthetic admin 身份）');
-    if (isUsingDefaultRelayToken()) {
-      console.warn('  [INSECURE] RELAY_TOKEN 使用默认值 "dev-token" — 节点注册不安全');
-    }
-    console.warn('  公网部署时请设置 NODE_ENV=production 并配置所有 token');
+    console.warn('  [DEV MODE] local 注册需先在 /admin 预注册 Node 获得 nodeSecret');
+    console.warn('  公网部署时请设置 NODE_ENV=production');
     console.warn('════════════════════════════════════════════════════════');
   }
 });

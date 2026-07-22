@@ -1,12 +1,12 @@
 import { WebSocket } from 'ws';
 import { randomUUID } from 'node:crypto';
-import { RELAY_TOKEN, isDevMode, isUsingDefaultRelayToken } from './config.js';
 import type { BrowserCommand, LocalEvent, LocalControl } from './types.js';
 import { BrowserCommandType, LocalCommandType, LocalEventType, BrowserEventType, LocalControlType } from './types.js';
 import { ConnStates } from './conn-state.js';
 import { NodeRegistry, type NodeConn } from './node-registry.js';
 import { SessionRouter } from './session-router.js';
 import { RequestMatcher } from './request-matcher.js';
+import { NodeStore } from './node-store.js';
 
 // 认证速率限制（browser 连接特有；属连接处理职责，未收进 4 个 domain module）
 const MAX_AUTH_FAILURES = 5;
@@ -34,6 +34,7 @@ const BROWSER_REQUEST_TIMEOUT_MS = 10000;
  * 保持 index.ts 的对外调用面不变。
  */
 export class ConnectionHandler {
+  private readonly nodeStore: NodeStore;
   private readonly states = new ConnStates();
   private readonly nodes = new NodeRegistry();
   private readonly router = new SessionRouter(
@@ -42,6 +43,14 @@ export class ConnectionHandler {
   );
   private readonly matcher = new RequestMatcher();
   private readonly authAttempts = new Map<WebSocket, { failures: number; lastAttempt: number }>();
+
+  /**
+   * nodeStore 用于 local 注册时校验预注册凭证（nodeId + nodeSecret，见 ADR-0004）。
+   * 注入而非模块内创建，便于 index.ts 作组合根、单测传临时 store。
+   */
+  constructor(nodeStore: NodeStore) {
+    this.nodeStore = nodeStore;
+  }
 
   // ---- 传输原语 ----
 
@@ -371,20 +380,17 @@ export class ConnectionHandler {
       case LocalEventType.Register: {
         const st = this.states.get(ws);
         const ip = st?.ip ?? '?';
-        if (!isDevMode() && isUsingDefaultRelayToken()) {
-          console.error(`[relay] 生产模式拒绝默认 token 注册 | IP: ${ip} | nodeId: ${msg.nodeId || 'unknown'}`);
-          // relay→local 拒绝信号（local 端不消费，仅作为 close 前的反馈），不属于 4 向协议 union
-          this.send(ws, { type: 'error', error: '认证失败：生产环境下不允许使用默认 token，请设置 RELAY_TOKEN' });
+        const nodeId = msg.nodeId || '';
+        const nodeSecret = msg.nodeSecret || '';
+        // 校验预注册凭证（nodeId + nodeSecret，见 ADR-0004）：未预注册或 secret 错一律拒绝，
+        // 文案不区分两种情况（避免 nodeId 枚举）。relay→local 拒绝信号（local 端据其停止重连），
+        // 不属于 4 向协议 union。
+        if (!this.nodeStore.verifyNodeSecret(nodeId, nodeSecret)) {
+          console.warn(`[relay] 节点注册认证失败: 未预注册或 nodeSecret 不正确 | IP: ${ip} | 声称 nodeId: ${nodeId || 'unknown'}`);
+          this.send(ws, { type: 'error', error: '认证失败：节点未预注册或 nodeSecret 不正确' });
           ws.close();
           return;
         }
-        if (msg.token !== RELAY_TOKEN) {
-          console.warn(`[relay] 节点注册认证失败: token 不匹配 | IP: ${ip} | 声称 nodeId: ${msg.nodeId || 'unknown'}`);
-          this.send(ws, { type: 'error', error: '认证失败：token 不匹配' });
-          ws.close();
-          return;
-        }
-        const nodeId = msg.nodeId || 'unknown';
         const replaced = this.nodes.register(nodeId, { ws, nodeId, passwordRequired: msg.passwordRequired === true, workspaceRoot: msg.workspaceRoot });
         if (replaced) {
           const oldSt = this.states.get(replaced.ws);
@@ -565,26 +571,33 @@ export class ConnectionHandler {
 }
 
 // ---- 模块级单例 + 5 个对外委托函数（保持 index.ts 调用面不变）----
+//
+// index.ts 是组合根：创建 NodeStore 后经 initRelay 注入。initRelay 在 server.listen 前必先调用，
+// 故 wrapper 函数对 relay 用 ! 断言——等价于原模块级 const relay = new ConnectionHandler() 的时序保证。
 
-const relay = new ConnectionHandler();
+let relay: ConnectionHandler | undefined;
+
+export function initRelay(nodeStore: NodeStore): void {
+  relay = new ConnectionHandler(nodeStore);
+}
 
 export function handleBrowserConnection(ws: WebSocket, ip: string): void {
-  relay.handleBrowserConnection(ws, ip);
+  relay!.handleBrowserConnection(ws, ip);
 }
 
 export function handleLocalConnection(ws: WebSocket, ip: string): void {
-  relay.handleLocalConnection(ws, ip);
+  relay!.handleLocalConnection(ws, ip);
 }
 
 export function requestLocal(data: Record<string, unknown>, nodeId?: string): Promise<unknown> {
-  return relay.requestLocal(data, nodeId);
+  return relay!.requestLocal(data, nodeId);
 }
 
 export function getOnlineNodes(): Array<{ nodeId: string; sessionCount: number; passwordRequired: boolean; workspaceRoot?: string }> {
-  return relay.getOnlineNodes();
+  return relay!.getOnlineNodes();
 }
 
 export function isNodePasswordRequired(nodeId: string): boolean {
-  return relay.isNodePasswordRequired(nodeId);
+  return relay!.isNodePasswordRequired(nodeId);
 }
 

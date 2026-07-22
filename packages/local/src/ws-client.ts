@@ -1,6 +1,6 @@
 import { WebSocket } from 'ws';
 import { readFileSync } from 'node:fs';
-import { RELAY_URL, RELAY_TOKEN, NODE_ID, NODE_PASSWORD, WORKSPACE_ROOT, RECONNECT_DELAY, MAX_RECONNECT_DELAY, RELAY_CA_CERT } from './config.js';
+import { RELAY_URL, NODE_ID, NODE_SECRET, NODE_PASSWORD, WORKSPACE_ROOT, RECONNECT_DELAY, MAX_RECONNECT_DELAY, RELAY_CA_CERT } from './config.js';
 import type { LocalCommand, LocalControl, LocalEvent } from './types.js';
 import { LocalEventType, LocalControlType } from './types.js';
 
@@ -16,6 +16,9 @@ let currentDelay = RECONNECT_DELAY;
 let reconnectAttempt = 0;       // 重连次数计数器
 let connectTime: Date | null = null;  // 本次连接建立时间
 let handlers: MessageHandler[] = [];
+// 注册被中转拒绝（未预注册 / nodeSecret 错误）的致命错误。置位后不再重连——
+// 凭证错误不会自愈，无限重连只会刷日志；需管理员修正配置（预注册 / 轮转 secret）后重启。
+let fatalError: string | null = null;
 
 export function onMessage(handler: MessageHandler): void {
   handlers.push(handler);
@@ -54,8 +57,8 @@ function connect(): void {
     currentDelay = RECONNECT_DELAY;
     reconnectAttempt = 0;  // 连接成功后重置重连计数
 
-    // 注册
-    send({ type: LocalEventType.Register, nodeId: NODE_ID, token: RELAY_TOKEN, passwordRequired: !!NODE_PASSWORD, workspaceRoot: WORKSPACE_ROOT });
+    // 注册：带预注册凭证（nodeId + nodeSecret），替代已废弃的全局 RELAY_TOKEN
+    send({ type: LocalEventType.Register, nodeId: NODE_ID, nodeSecret: NODE_SECRET, passwordRequired: !!NODE_PASSWORD, workspaceRoot: WORKSPACE_ROOT });
   });
 
   ws.on('message', (raw) => {
@@ -63,6 +66,13 @@ function connect(): void {
       const msg = JSON.parse(raw.toString());
       if (msg.type === LocalControlType.Ping) {
         send({ type: LocalEventType.Pong });
+        return;
+      }
+      // relay→local 的顶层 error 仅在注册拒绝时发送（见 ws-relay Register 分支）。
+      // 捕获后置位 fatalError：close 事件随后触发，因已置位不再重连，给管理员明确提示。
+      if (msg.type === 'error') {
+        fatalError = (msg as { error?: string }).error || '未知错误';
+        console.error(`[ws-client] 注册被中转拒绝: ${fatalError}`);
         return;
       }
       for (const handler of handlers) {
@@ -79,6 +89,12 @@ function connect(): void {
     console.log(`[ws-client] 连接已断开 | 本次持续: ${duration} | closeCode: ${code} | reason: ${reasonStr}`);
     ws = null;
     connectTime = null;
+    if (fatalError) {
+      // 凭证错误不会自愈：停止重连，提示管理员修正 NODE_ID / NODE_SECRET 后重启
+      console.error(`[ws-client] 注册认证失败，已停止重连 | 原因: ${fatalError}`);
+      console.error('[ws-client] 请确认 NODE_ID 已在 /admin 预注册、NODE_SECRET 正确（或已轮转），修正后重启本服务');
+      return;
+    }
     scheduleReconnect();
   });
 

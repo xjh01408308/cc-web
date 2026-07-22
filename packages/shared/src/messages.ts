@@ -362,7 +362,8 @@ export const LocalEventType = {
 export interface LocalRegisterEvent {
   type: typeof LocalEventType.Register;
   nodeId?: string;
-  token: string;
+  /** Node 注册凭证（每 Node 独立，由管理员预发生成）；替代已废弃的全局 RELAY_TOKEN（见 ADR-0004） */
+  nodeSecret: string;
   passwordRequired?: boolean;
   workspaceRoot?: string;
 }

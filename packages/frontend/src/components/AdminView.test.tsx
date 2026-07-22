@@ -51,6 +51,9 @@ describe("AdminView — admin 用户管理", () => {
           { id: "a1", username: "admin", role: "admin", createdAt: 1700000000000 },
         ]);
       }
+      if (url.includes("/api/admin/nodes")) {
+        return mockResponse(true, []);
+      }
       return mockResponse(false);
     });
   }
@@ -101,6 +104,77 @@ describe("AdminView — admin 用户管理", () => {
       const delCall = fetchMock.mock.calls.find((c) => (c[1] as RequestInit | undefined)?.method === "DELETE");
       expect(delCall).toBeTruthy();
       expect((delCall![0] as string)).toContain("/api/admin/users/u1");
+    });
+  });
+});
+
+describe("AdminView — admin Node 预注册", () => {
+  // 用户列表恒空，使"删除"按钮仅来自 Node 行，避免 getByRole 歧义。
+  function nodeFetchMock(handlers: { onCreate?: () => unknown; onRotate?: () => unknown; onDelete?: () => unknown } = {}) {
+    return vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.includes("/api/session")) return mockResponse(true, { user: { username: "admin", role: "admin" } });
+      if (url.includes("/api/admin/users")) return mockResponse(true, []);
+      if (url.includes("/api/admin/nodes")) {
+        if (url.includes("/rotate-secret")) return mockResponse(true, handlers.onRotate?.() ?? { ok: true, secret: "new-secret-456" });
+        if ((init?.method) === "POST") return mockResponse(true, handlers.onCreate?.() ?? { ok: true, node: { id: "n1", nodeId: "dev-laptop", createdAt: 1700000000000 }, secret: "abc123secret" });
+        if ((init?.method) === "DELETE") return mockResponse(true, handlers.onDelete?.() ?? { ok: true });
+        return mockResponse(true, [{ id: "n1", nodeId: "dev-laptop", createdAt: 1700000000000 }]);
+      }
+      return mockResponse(false);
+    });
+  }
+
+  it("admin → 加载并展示预注册 Node 列表", async () => {
+    vi.stubGlobal("fetch", nodeFetchMock());
+    render(<AdminView />);
+    await waitFor(() => expect(screen.getByText("dev-laptop")).toBeTruthy());
+  });
+
+  it("预注册 Node → POST 携带 nodeId，并展示一次性 secret", async () => {
+    const fetchMock = nodeFetchMock();
+    vi.stubGlobal("fetch", fetchMock);
+    render(<AdminView />);
+    await waitFor(() => expect(screen.getByPlaceholderText("节点 ID（如 dev-laptop）")).toBeTruthy());
+
+    fireEvent.change(screen.getByPlaceholderText("节点 ID（如 dev-laptop）"), { target: { value: "dev-laptop" } });
+    fireEvent.click(screen.getByRole("button", { name: "预注册" }));
+
+    // 展示一次性明文 secret
+    await waitFor(() => expect(screen.getByText("abc123secret")).toBeTruthy());
+    // POST body 仅含 nodeId
+    const createCall = fetchMock.mock.calls.find((c) => (c[0] as string).includes("/api/admin/nodes") && (c[1] as RequestInit | undefined)?.method === "POST");
+    expect(createCall).toBeTruthy();
+    expect(JSON.parse((createCall![1] as RequestInit).body as string)).toEqual({ nodeId: "dev-laptop" });
+  });
+
+  it("轮转 secret → 确认后 POST rotate-secret，展示新 secret", async () => {
+    vi.stubGlobal("confirm", () => true);
+    const fetchMock = nodeFetchMock();
+    vi.stubGlobal("fetch", fetchMock);
+    render(<AdminView />);
+    await waitFor(() => expect(screen.getByText("dev-laptop")).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: "轮转 secret" }));
+
+    await waitFor(() => expect(screen.getByText("new-secret-456")).toBeTruthy());
+    const rotateCall = fetchMock.mock.calls.find((c) => (c[0] as string).includes("/rotate-secret") && (c[1] as RequestInit | undefined)?.method === "POST");
+    expect(rotateCall).toBeTruthy();
+    expect((rotateCall![0] as string)).toContain("/api/admin/nodes/n1");
+  });
+
+  it("删除 Node → 确认后 DELETE /api/admin/nodes/:id", async () => {
+    vi.stubGlobal("confirm", () => true);
+    const fetchMock = nodeFetchMock();
+    vi.stubGlobal("fetch", fetchMock);
+    render(<AdminView />);
+    await waitFor(() => expect(screen.getByText("dev-laptop")).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+
+    await waitFor(() => {
+      const delCall = fetchMock.mock.calls.find((c) => (c[1] as RequestInit | undefined)?.method === "DELETE");
+      expect(delCall).toBeTruthy();
+      expect((delCall![0] as string)).toContain("/api/admin/nodes/n1");
     });
   });
 });
