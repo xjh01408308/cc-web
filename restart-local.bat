@@ -14,7 +14,7 @@ echo.
 
 echo [2/2] Starting local service...
 cd /d "%~dp0packages\local"
-start "cc-web-local" cmd /c "npx tsx --env-file=..\..\.env src/index.ts"
+start "cc-web-local" cmd /c "npx tsx --env-file=.env src/index.ts"
 echo   Started
 echo.
 

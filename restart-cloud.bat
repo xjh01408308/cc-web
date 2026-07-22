@@ -27,7 +27,7 @@ echo.
 
 echo [3/4] Starting relay service (port 3001)...
 cd /d "%~dp0packages\relay"
-start "cc-web-relay" cmd /c "npx tsx --env-file=..\..\.env src/index.ts"
+start "cc-web-relay" cmd /c "npx tsx --env-file=.env src/index.ts"
 echo   Started
 echo.
 
