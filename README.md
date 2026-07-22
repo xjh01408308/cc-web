@@ -84,8 +84,8 @@ cp packages/local/.env.example packages/local/.env
 ```bash
 NODE_ENV=production
 RELAY_PORT=3001                 # 监听端口
-RELAY_TOKEN=<随机字符串>         # 本地服务注册认证 token（须与 local 端一致，生产必须修改）
-RELAY_PASSWORD=<访问密码>        # 浏览器 /api/login 登录密码（生产强烈建议设置）
+INITIAL_ADMIN_USER=admin        # 首 admin 种子（仅 users 表为空时创建一次）
+INITIAL_ADMIN_PASSWORD=<管理员密码>  # 浏览器登录密码（首启创建首个 admin）
 STATIC_DIR=../../frontend/dist  # 前端静态文件路径
 ```
 
@@ -95,9 +95,9 @@ STATIC_DIR=../../frontend/dist  # 前端静态文件路径
 # 同机器部署（推荐）: ws://127.0.0.1:3001/ws/local
 # 跨机器部署（需 nginx 代理 WSS）: wss://your-domain.com/ws/local
 RELAY_URL=ws://127.0.0.1:3001/ws/local
-RELAY_TOKEN=<与 relay 端一致>     # 注册认证 token（须与 relay 端相同）
+NODE_ID=<管理员预注册时指定的节点 ID>      # 必填：管理员在 /admin 预注册 Node 后获得
+NODE_SECRET=<预注册后展示一次的注册凭证>    # 必填：每 Node 独立，替代已废弃的 RELAY_TOKEN
 RELAY_CA_CERT=                  # wss 自签名证书 CA 路径（留空用系统 CA）
-NODE_ID=                        # 节点标识（留空自动取 hostname）
 NODE_PASSWORD=                  # 节点登录密码（留空不启用认证）
 WORKSPACE_ROOT=                 # 项目工作区根目录（留空不限制路径）
 RECONNECT_DELAY=2000            # 重连初始延迟（毫秒）
@@ -105,7 +105,7 @@ MAX_RECONNECT_DELAY=30000       # 重连最大延迟（毫秒）
 CLAUDE_FORCE_PERMISSION_MODE=   # 强制锁定权限模式（留空以前端为准）
 ```
 
-> `RELAY_TOKEN` 在两端必须取相同值，否则 local 注册会被 relay 拒绝。
+> Node 注册采用每 Node 独立凭证：管理员先在浏览器 `/admin` 预注册 Node 获得 `(NODE_ID, NODE_SECRET)`，再配置到 local `.env`。未预注册或凭证错的 local 会被 relay 拒绝。全局 `RELAY_TOKEN` 已废弃（见 ADR-0004）。
 >
 > 前端（`packages/frontend`）由 Vite 自动加载其包内 `.env`，`VITE_WS_URL` 留空即可（前端按页面协议自动选择 ws/wss）。
 
@@ -128,12 +128,14 @@ restart.bat
 ```bash
 # 1. 配置 packages/relay/.env
 #    NODE_ENV=production
-#    RELAY_TOKEN=<强随机字符串>
-#    RELAY_PASSWORD=<访问密码>
+#    INITIAL_ADMIN_PASSWORD=<管理员密码>
 
 # 2. 构建前端 & 启动
 npm run build:frontend
 ./restart-cloud.sh
+
+# 3. 浏览器登录 admin 后，到 /admin 预注册 Node 获得 (NODE_ID, NODE_SECRET)
+#    （供下一步配置到远程 local）
 ```
 
 **配置 nginx + HTTPS（生产必须）**：
@@ -160,7 +162,7 @@ sudo nginx -t && sudo systemctl reload nginx
 ```bash
 # 1. 修改 packages/local/.env：
 #    RELAY_URL=wss://your-domain.com/ws/local  (跨机器必须走 WSS)
-#    RELAY_TOKEN=与云服务一致的值
+#    NODE_ID / NODE_SECRET = 管理员在 /admin 预注册该 Node 时给出的值
 # 2. 启动
 ./restart-local.sh
 ```
@@ -286,8 +288,8 @@ data/sessions/
 
 - **传输加密**：生产部署通过 nginx 提供 HTTPS/WSS（`nginx.conf.example`），relay 仅监听 `127.0.0.1` 不对外暴露
 - **认证机制**：
-  - 中转 ↔ 本地：预共享 token 认证 (`RELAY_TOKEN`)，生产模式禁止使用默认值
-  - 浏览器 ↔ 中转：token 认证 (`RELAY_BROWSER_TOKEN`)，生产模式必须设置
+  - 中转 ↔ 本地：每 Node 独立预注册凭证 (`NODE_ID` + `NODE_SECRET`)，管理员在 `/admin` 预注册后下发；未预注册或凭证错的 local 连不上（见 ADR-0004，已废弃全局 `RELAY_TOKEN`）
+  - 浏览器 ↔ 中转：多用户登录（用户名 + 密码 → httpOnly cookie session），首个 admin 经 `INITIAL_ADMIN_*` seed
   - 浏览器 ↔ 节点：可选密码认证 (`NODE_PASSWORD`)
 - **路径安全**：静态文件服务路径穿越防护，API 端点路径白名单
 - **部署安全**：本地服务不暴露端口，仅作 WS 客户端
@@ -311,8 +313,7 @@ data/sessions/
 
 # 2. 配置 packages/relay/.env
 #    NODE_ENV=production
-#    RELAY_TOKEN=<强随机字符串>
-#    RELAY_PASSWORD=<访问密码>
+#    INITIAL_ADMIN_PASSWORD=<管理员密码>
 #    RELAY_PORT=3001
 
 # 3. 安装依赖、构建前端、启动
@@ -333,7 +334,7 @@ sudo nginx -t && sudo systemctl reload nginx
 # 本地开发机上
 # 1. 修改 packages/local/.env：
 #    RELAY_URL=wss://your-domain.com/ws/local  (跨机器走 WSS)
-#    RELAY_TOKEN=与云服务一致的值
+#    NODE_ID / NODE_SECRET = 管理员在 /admin 预注册该 Node 时给出的值
 # 2. 确保已安装 claude CLI 并可用
 npm install
 ./restart-local.sh

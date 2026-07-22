@@ -12,7 +12,7 @@ console.error = (...args: unknown[]) => _error(`[${ts()}]`, ...args);
 console.warn = (...args: unknown[]) => _warn(`[${ts()}]`, ...args);
 
 import { start, onMessage, send } from './ws-client.js';
-import { NODE_PASSWORD, FORCE_PERMISSION_MODE, isDevMode, isNodePasswordEmpty, WORKSPACE_ROOT } from './config.js';
+import { NODE_ID, NODE_SECRET, NODE_PASSWORD, FORCE_PERMISSION_MODE, isDevMode, isNodePasswordEmpty, WORKSPACE_ROOT } from './config.js';
 import {
   createSession,
   sendMessage,
@@ -35,6 +35,14 @@ import { getGitStatus, getGitDiff } from './git-utils.js';
 import { getFileTree, getFileContent } from './file-utils.js';
 import type { LocalResponseEvent } from './types.js';
 import { LocalCommandType, LocalControlType, LocalEventType } from './types.js';
+
+// 启动前置校验：NODE_ID / NODE_SECRET 必填（管理员在 /admin 预注册 Node 后获得，见 ADR-0004）。
+// 缺一不可——未预注册或凭证错的 local 会被 relay 拒绝并停止重连，故在此 fail fast 给明确提示。
+if (!NODE_ID || !NODE_SECRET) {
+  console.error('启动失败：NODE_ID 和 NODE_SECRET 必须设置。');
+  console.error('由管理员在 /admin 预注册 Node 获得（NODE_ID = 节点 ID，NODE_SECRET = 展示一次的注册凭证）。');
+  process.exit(1);
+}
 
 // composition root：注入传输端点到领域层（依赖反转的 wiring）。
 // 必须在任何可能触发领域层传输出口的代码之前完成，避免丢失启动早期的领域事件。

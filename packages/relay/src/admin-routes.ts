@@ -8,6 +8,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { UserStore, UserRole } from './user-store.js';
+import type { NodeStore, CreatedNode } from './node-store.js';
 import { jsonResponse, readBody } from './http-utils.js';
 
 /** 当前 session 的管理视图子集（index.ts 的 Session 结构兼容：含 userId/username/role 即可） */
@@ -129,6 +130,97 @@ export async function handleAdminUsersRoute(
     const target = ensureTargetIsUser(res, deps.userStore, segments[3]);
     if (!target) return true;
     deps.userStore.deleteUser(target.id);
+    jsonResponse(res, { ok: true });
+    return true;
+  }
+
+  return false;
+}
+
+// ===========================================================================
+// /api/admin/nodes* —— Node 预注册管理（issue #23 / ADR-0004）
+// ===========================================================================
+
+export interface NodeRouteDeps {
+  session: AdminSession | null;
+  nodeStore: NodeStore;
+}
+
+/**
+ * 处理 /api/admin/nodes* 路由。复用 requireAdmin 守卫（与 users 同模式）。
+ *
+ * - GET    /api/admin/nodes             列表（不含 secret_hash）
+ * - POST   /api/admin/nodes             预注册 { nodeId } → 返回 { node, secret }（明文 secret 仅此一次）
+ * - POST   /api/admin/nodes/:id/rotate-secret  轮转 → 返回新 { secret }（旧 secret 立即失效）
+ * - DELETE /api/admin/nodes/:id         删除预注册 Node（删后该 local 即便持有旧 secret 也连不上）
+ *
+ * 返回 true 表示已处理；false 表示 URL 不归本处理器（index.ts 继续向下匹配）。
+ */
+export async function handleAdminNodesRoute(
+  req: IncomingMessage,
+  res: ServerResponse,
+  deps: NodeRouteDeps,
+): Promise<boolean> {
+  const url = req.url || '';
+  const method = req.method || '';
+  if (!url.startsWith('/api/admin/nodes')) return false;
+
+  const segments = url.split('?')[0].split('/').filter(Boolean); // ['api','admin','nodes', ...]
+
+  // /api/admin/nodes —— 列表 / 创建
+  if (segments.length === 3) {
+    if (method === 'GET') {
+      if (!requireAdmin(res, deps.session)) return true;
+      jsonResponse(res, deps.nodeStore.listNodes());
+      return true;
+    }
+    if (method === 'POST') {
+      if (!requireAdmin(res, deps.session)) return true;
+      try {
+        const parsed = JSON.parse((await readBody(req)) || '{}') as { nodeId?: unknown };
+        const nodeId = typeof parsed.nodeId === 'string' ? parsed.nodeId.trim() : '';
+        if (!nodeId) {
+          jsonResponse(res, { error: '节点 ID 不能为空' }, 400);
+          return true;
+        }
+        let created: CreatedNode;
+        try {
+          created = deps.nodeStore.createNode(nodeId);
+        } catch {
+          jsonResponse(res, { error: '节点 ID 已存在' }, 409);
+          return true;
+        }
+        // 明文 secret 仅此一次回传给管理员，DB 仅存 scrypt 哈希
+        jsonResponse(res, { ok: true, node: created.node, secret: created.secret });
+        return true;
+      } catch {
+        jsonResponse(res, { error: '请求格式错误' }, 400);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // /api/admin/nodes/:id/rotate-secret
+  if (segments.length === 5 && segments[4] === 'rotate-secret' && method === 'POST') {
+    if (!requireAdmin(res, deps.session)) return true;
+    const rotated = deps.nodeStore.rotateSecret(segments[3]);
+    if (!rotated) {
+      jsonResponse(res, { error: '节点不存在' }, 404);
+      return true;
+    }
+    jsonResponse(res, { ok: true, secret: rotated.secret });
+    return true;
+  }
+
+  // /api/admin/nodes/:id —— 删除
+  if (segments.length === 4 && method === 'DELETE') {
+    if (!requireAdmin(res, deps.session)) return true;
+    const ok = deps.nodeStore.deleteNode(segments[3]);
+    if (!ok) {
+      jsonResponse(res, { error: '节点不存在' }, 404);
+      return true;
+    }
     jsonResponse(res, { ok: true });
     return true;
   }

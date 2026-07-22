@@ -1,6 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { randomUUID } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
 import type { WebSocket } from 'ws';
 import { ConnectionHandler } from '../src/ws-relay.js';
+import { NodeStore } from '../src/node-store.js';
 import {
   BrowserCommandType,
   BrowserEventType,
@@ -45,27 +50,50 @@ function sendMsg(m: MockWs, msg: Record<string, unknown>): void {
   m.emit('message', Buffer.from(JSON.stringify(msg)));
 }
 
-// 注册一个 local 节点（devMode 下默认 token 'dev-token' 放行）
-function registerNode(m: MockWs, nodeId: string, opts: { passwordRequired?: boolean; token?: string; workspaceRoot?: string } = {}): void {
+// 每例独立临时 db（与 node-store.test 同构）：预注册 Node 凭证用。
+function tmpStore(): { store: NodeStore; cleanup: () => void } {
+  const dbPath = path.join(os.tmpdir(), `cc-web-relay-test-${randomUUID()}.db`);
+  const store = new NodeStore(dbPath);
+  const cleanup = (): void => {
+    store.close();
+    for (const suffix of ['', '-wal', '-shm']) fs.rmSync(dbPath + suffix, { force: true });
+  };
+  return { store, cleanup };
+}
+
+let storeCleanup: (() => void) | undefined;
+
+// 每例建一个 handler + 配套临时 nodeStore（注册校验依赖预注册凭证）。
+function makeHandler(): { handler: ConnectionHandler; store: NodeStore } {
+  const t = tmpStore();
+  storeCleanup = t.cleanup;
+  return { handler: new ConnectionHandler(t.store), store: t.store };
+}
+
+// 注册一个 local 节点：先在 nodeStore 预注册拿到明文 secret，再用它 register。
+// opts.nodeSecret 显式传值可模拟"错误 secret"；不传则用预注册生成正确 secret。
+function registerNode(store: NodeStore, m: MockWs, nodeId: string, opts: { passwordRequired?: boolean; nodeSecret?: string; workspaceRoot?: string } = {}): string {
+  const secret = store.createNode(nodeId).secret;
   sendMsg(m, {
     type: LocalEventType.Register,
     nodeId,
-    token: opts.token ?? 'dev-token',
+    nodeSecret: opts.nodeSecret ?? secret,
     passwordRequired: opts.passwordRequired ?? false,
     workspaceRoot: opts.workspaceRoot,
   });
+  return secret;
 }
 
 describe('ConnectionHandler', () => {
   beforeEach(() => vi.useFakeTimers());
-  afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });
+  afterEach(() => { storeCleanup?.(); storeCleanup = undefined; vi.clearAllTimers(); vi.useRealTimers(); });
 
   describe('local 注册', () => {
     it('合法 token：进 registry + 回 Registered + 向后连入的 browser 广播 NodesList', () => {
-      const h = new ConnectionHandler();
+      const { handler: h, store } = makeHandler();
       const local = mockWs();
       h.handleLocalConnection(local.ws, '10.0.0.1');
-      registerNode(local, 'n1', { workspaceRoot: '/a' });
+      registerNode(store, local, 'n1', { workspaceRoot: '/a' });
       expect(local.sent).toContainEqual({ type: LocalControlType.Registered });
 
       const browser = mockWs();
@@ -76,19 +104,29 @@ describe('ConnectionHandler', () => {
       });
     });
 
-    it('非法 token：回 error 并 close（节点不进 registry）', () => {
-      const h = new ConnectionHandler();
+    it('错误 nodeSecret：回 error 并 close（节点不进 registry）', () => {
+      const { handler: h, store } = makeHandler();
       const local = mockWs();
       h.handleLocalConnection(local.ws, '10.0.0.1');
-      registerNode(local, 'n1', { token: 'wrong' });
-      expect(local.sent).toContainEqual({ type: 'error', error: '认证失败：token 不匹配' });
+      registerNode(store, local, 'n1', { nodeSecret: 'wrong' });
+      expect(local.sent).toContainEqual({ type: 'error', error: '认证失败：节点未预注册或 nodeSecret 不正确' });
+      expect(local.closed).toBe(true);
+    });
+
+    it('未预注册的 nodeId：同样被拒（不泄露是否存在）', () => {
+      const { handler: h } = makeHandler();
+      const local = mockWs();
+      h.handleLocalConnection(local.ws, '10.0.0.1');
+      // 不预注册，直接 register
+      sendMsg(local, { type: LocalEventType.Register, nodeId: 'ghost', nodeSecret: 'anything' });
+      expect(local.sent).toContainEqual({ type: 'error', error: '认证失败：节点未预注册或 nodeSecret 不正确' });
       expect(local.closed).toBe(true);
     });
   });
 
   describe('browser → local 路由', () => {
     it('Chat 无在线节点 → error「未选择节点，请先选择节点」', () => {
-      const h = new ConnectionHandler();
+      const { handler: h, store } = makeHandler();
       const browser = mockWs();
       h.handleBrowserConnection(browser.ws, '1.2.3.4');
       sendMsg(browser, { type: BrowserCommandType.Chat, sessionId: 's1', text: 'hi' });
@@ -96,8 +134,8 @@ describe('ConnectionHandler', () => {
     });
 
     it('Chat 单节点自动选中 → local 收到 chat 命令', () => {
-      const h = new ConnectionHandler();
-      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip'); registerNode(local, 'n1');
+      const { handler: h, store } = makeHandler();
+      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip'); registerNode(store, local, 'n1');
       const browser = mockWs(); h.handleBrowserConnection(browser.ws, 'ip');
       sendMsg(browser, { type: BrowserCommandType.Chat, sessionId: 's1', text: 'hi', projectPath: '/p' });
       expect(local.sent).toContainEqual(expect.objectContaining({
@@ -106,16 +144,16 @@ describe('ConnectionHandler', () => {
     });
 
     it('Chat 显式 nodeId 离线 → error「节点 X 已离线」', () => {
-      const h = new ConnectionHandler();
-      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip'); registerNode(local, 'n1');
+      const { handler: h, store } = makeHandler();
+      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip'); registerNode(store, local, 'n1');
       const browser = mockWs(); h.handleBrowserConnection(browser.ws, 'ip');
       sendMsg(browser, { type: BrowserCommandType.Chat, nodeId: 'gone', sessionId: 's1', text: 'hi' });
       expect(browser.sent).toContainEqual({ type: BrowserEventType.Error, error: '节点 gone 已离线' });
     });
 
     it('节点需密码 + browser 未认证 → AuthRequired，local 不收到 chat', () => {
-      const h = new ConnectionHandler();
-      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip'); registerNode(local, 'n1', { passwordRequired: true });
+      const { handler: h, store } = makeHandler();
+      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip'); registerNode(store, local, 'n1', { passwordRequired: true });
       const browser = mockWs(); h.handleBrowserConnection(browser.ws, 'ip');
       sendMsg(browser, { type: BrowserCommandType.Chat, sessionId: 's1', text: 'hi' });
       expect(browser.sent).toContainEqual(expect.objectContaining({ type: BrowserEventType.AuthRequired, nodeId: 'n1' }));
@@ -125,8 +163,8 @@ describe('ConnectionHandler', () => {
 
   describe('会话订阅 + claude_json 广播', () => {
     it('Chat 带 sessionId 订阅：local 发 claude_json 带 sessionId → 该 browser 收到', () => {
-      const h = new ConnectionHandler();
-      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip'); registerNode(local, 'n1');
+      const { handler: h, store } = makeHandler();
+      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip'); registerNode(store, local, 'n1');
       const sub = mockWs(); h.handleBrowserConnection(sub.ws, 'ip');
       const other = mockWs(); h.handleBrowserConnection(other.ws, 'ip');
       sendMsg(sub, { type: BrowserCommandType.Chat, sessionId: 's1', text: 'hi' });
@@ -140,9 +178,9 @@ describe('ConnectionHandler', () => {
 
   describe('StopSession 按 sessionId 找节点', () => {
     it('SessionInfo 绑定后 StopSession → local 收到 stop（即便多节点也不靠自动选）', () => {
-      const h = new ConnectionHandler();
-      const localA = mockWs(); h.handleLocalConnection(localA.ws, 'ip'); registerNode(localA, 'nA');
-      const localB = mockWs(); h.handleLocalConnection(localB.ws, 'ip'); registerNode(localB, 'nB');
+      const { handler: h, store } = makeHandler();
+      const localA = mockWs(); h.handleLocalConnection(localA.ws, 'ip'); registerNode(store, localA, 'nA');
+      const localB = mockWs(); h.handleLocalConnection(localB.ws, 'ip'); registerNode(store, localB, 'nB');
       const browser = mockWs(); h.handleBrowserConnection(browser.ws, 'ip');
       // s1 绑定到 nB
       sendMsg(localB, { type: LocalEventType.SessionInfo, sessionId: 's1', status: 'running', projectPath: '/x' });
@@ -154,8 +192,8 @@ describe('ConnectionHandler', () => {
 
   describe('浏览器请求-响应回程', () => {
     it('ListSessions：browser 发 → local 收到带 _reqId → local 回 sessions_list 带 _reqId → browser 收到（去 _reqId + 加 nodeId）', () => {
-      const h = new ConnectionHandler();
-      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip'); registerNode(local, 'n1');
+      const { handler: h, store } = makeHandler();
+      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip'); registerNode(store, local, 'n1');
       const browser = mockWs(); h.handleBrowserConnection(browser.ws, 'ip');
       sendMsg(browser, { type: BrowserCommandType.ListSessions });
       const req = local.sent.find((m) => (m as { type?: string }).type === 'list_sessions') as { _reqId?: string };
@@ -168,8 +206,8 @@ describe('ConnectionHandler', () => {
 
   describe('ListSessions 离线静默（与 Chat 离线报 error 的不一致行为保持）', () => {
     it('ListSessions 显式 nodeId 离线 → 不回 error、local 不收到请求', () => {
-      const h = new ConnectionHandler();
-      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip'); registerNode(local, 'n1');
+      const { handler: h, store } = makeHandler();
+      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip'); registerNode(store, local, 'n1');
       const browser = mockWs(); h.handleBrowserConnection(browser.ws, 'ip');
       sendMsg(browser, { type: BrowserCommandType.ListSessions, nodeId: 'gone' });
       expect(browser.sent.find((m) => (m as { type?: string }).type === 'error')).toBeUndefined();
@@ -179,15 +217,15 @@ describe('ConnectionHandler', () => {
 
   describe('requestLocal（HTTP API）', () => {
     it('无在线节点 → reject「没有在线的本地节点」', async () => {
-      const h = new ConnectionHandler();
+      const { handler: h, store } = makeHandler();
       await expect(h.requestLocal({ type: 'list_projects' })).rejects.toThrow('没有在线的本地节点');
     });
   });
 
   describe('AuthNode 超时重试（跨公网丢包容错）', () => {
     it('5s 超时后重发一次 → local 收到两次 auth_node，浏览器尚未收到失败', () => {
-      const h = new ConnectionHandler();
-      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip'); registerNode(local, 'n1', { passwordRequired: true });
+      const { handler: h, store } = makeHandler();
+      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip'); registerNode(store, local, 'n1', { passwordRequired: true });
       const browser = mockWs(); h.handleBrowserConnection(browser.ws, 'ip');
       browser.sent.length = 0; local.sent.length = 0;
       sendMsg(browser, { type: BrowserCommandType.AuthNode, nodeId: 'n1', password: 'any' });
@@ -200,8 +238,8 @@ describe('ConnectionHandler', () => {
     });
 
     it('两次都超时 → 报"认证超时"（带 nodeId）', () => {
-      const h = new ConnectionHandler();
-      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip'); registerNode(local, 'n1', { passwordRequired: true });
+      const { handler: h, store } = makeHandler();
+      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip'); registerNode(store, local, 'n1', { passwordRequired: true });
       const browser = mockWs(); h.handleBrowserConnection(browser.ws, 'ip');
       browser.sent.length = 0;
       sendMsg(browser, { type: BrowserCommandType.AuthNode, nodeId: 'n1', password: 'any' });
@@ -211,8 +249,8 @@ describe('ConnectionHandler', () => {
     });
 
     it('首次丢包、重试时 local 回包 → 认证成功（迟到回包无害）', () => {
-      const h = new ConnectionHandler();
-      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip'); registerNode(local, 'n1', { passwordRequired: true });
+      const { handler: h, store } = makeHandler();
+      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip'); registerNode(store, local, 'n1', { passwordRequired: true });
       const browser = mockWs(); h.handleBrowserConnection(browser.ws, 'ip');
       browser.sent.length = 0; local.sent.length = 0;
       sendMsg(browser, { type: BrowserCommandType.AuthNode, nodeId: 'n1', password: 'any' });
@@ -226,8 +264,8 @@ describe('ConnectionHandler', () => {
 
   describe('local 链路假死检测', () => {
     it('local 超过 LOCAL_IDLE_TIMEOUT_MS(90s) 无任何消息 → 心跳主动关闭触发重连', () => {
-      const h = new ConnectionHandler();
-      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip'); registerNode(local, 'n1');
+      const { handler: h, store } = makeHandler();
+      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip'); registerNode(store, local, 'n1');
       expect(local.closed).toBe(false);
       // local 既不回 pong 也不发任何消息 → 3 个 ping 周期（90s）后判定假死
       vi.advanceTimersByTime(90000);
@@ -235,8 +273,8 @@ describe('ConnectionHandler', () => {
     });
 
     it('local 正常回 pong → 持续活跃，不关闭', () => {
-      const h = new ConnectionHandler();
-      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip'); registerNode(local, 'n1');
+      const { handler: h, store } = makeHandler();
+      const local = mockWs(); h.handleLocalConnection(local.ws, 'ip'); registerNode(store, local, 'n1');
       // 每个 ping 周期内 local 回 pong，模拟链路正常
       vi.advanceTimersByTime(30000);
       sendMsg(local, { type: LocalEventType.Pong });
