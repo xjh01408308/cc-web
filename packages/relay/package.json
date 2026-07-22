@@ -9,9 +9,11 @@
   },
   "dependencies": {
     "@cc-web/shared": "*",
+    "better-sqlite3": "^12.9.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/ws": "^8.5.0",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",

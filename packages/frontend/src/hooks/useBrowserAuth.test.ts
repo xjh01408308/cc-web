@@ -2,14 +2,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { renderHook, act, waitFor } from "@testing-library/react";
 import { useBrowserAuth } from "./useBrowserAuth";
-import { isDevelopment } from "../utils/environment";
-
-// 默认 DEV=true 以保留 mount effect 的 dev 自动登录行为；prod 用例单独覆盖
-vi.mock("../utils/environment", () => ({
-  isDevelopment: vi.fn(() => true),
-  isProduction: vi.fn(() => false),
-}));
-const mockedIsDevelopment = vi.mocked(isDevelopment);
 
 // 构造极简 Response 形状（useBrowserAuth 只用 ok/status/json/clone）。
 function mockResponse(ok: boolean, body: unknown = {}): Response {
@@ -23,7 +15,6 @@ function mockResponse(ok: boolean, body: unknown = {}): Response {
 }
 
 beforeEach(() => {
-  mockedIsDevelopment.mockReturnValue(true);
   vi.stubGlobal("fetch", vi.fn());
 });
 
@@ -32,8 +23,8 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("useBrowserAuth — 自动登录探测（mount effect）", () => {
-  it("已有 session → authed=true 且不尝试 dev 登录", async () => {
+describe("useBrowserAuth — session 探测（mount effect）", () => {
+  it("已有 session → authed=true 且不调用 /api/login", async () => {
     const fetchMock = vi.fn((url: string) =>
       Promise.resolve(mockResponse(url.includes("/api/session")))
     );
@@ -47,91 +38,80 @@ describe("useBrowserAuth — 自动登录探测（mount effect）", () => {
     expect(urls.some((u) => u.includes("/api/login"))).toBe(false);
   });
 
-  it("无 session + dev 自动登录成功 → authed=true", async () => {
-    // session 失败、login 成功
-    const fetchMock = vi.fn((url: string) =>
-      Promise.resolve(mockResponse(!url.includes("/api/session")))
-    );
-    vi.stubGlobal("fetch", fetchMock);
-
-    const { result } = renderHook(() => useBrowserAuth());
-    await waitFor(() => expect(result.current.authed).toBe(true));
-  });
-
-  it("session 与 dev 登录都失败 → 保持未登录", async () => {
-    const fetchMock = vi.fn(() => Promise.resolve(mockResponse(false)));
-    vi.stubGlobal("fetch", fetchMock);
-
-    const { result } = renderHook(() => useBrowserAuth());
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
-    expect(result.current.authed).toBe(false);
-  });
-
-  it("网络异常（session fetch reject）→ 回退到 dev 登录", async () => {
-    const fetchMock = vi.fn((url: string) => {
-      if (url.includes("/api/session")) return Promise.reject(new Error("net"));
-      return Promise.resolve(mockResponse(true)); // dev 登录成功
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const { result } = renderHook(() => useBrowserAuth());
-    await waitFor(() => expect(result.current.authed).toBe(true));
-  });
-
-  it("prod 下无 session → 不尝试空密码 login（无 /api/login 调用）", async () => {
-    mockedIsDevelopment.mockReturnValue(false);
+  it("无 session → 保持未登录，仅探测一次 /api/login 不被调用", async () => {
     const fetchMock = vi.fn((_url: string) => Promise.resolve(mockResponse(false)));
     vi.stubGlobal("fetch", fetchMock);
 
     const { result } = renderHook(() => useBrowserAuth());
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
 
+    expect(result.current.authed).toBe(false);
     const urls = fetchMock.mock.calls.map((c) => c[0] as string);
-    expect(urls.some((u) => u.includes("/api/session"))).toBe(true);
     expect(urls.some((u) => u.includes("/api/login"))).toBe(false);
+  });
+
+  it("网络异常（session fetch reject）→ 保持未登录", async () => {
+    const fetchMock = vi.fn(() => Promise.reject(new Error("net")));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderHook(() => useBrowserAuth());
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     expect(result.current.authed).toBe(false);
   });
 });
 
-describe("useBrowserAuth — handleLogin", () => {
-  it("密码正确 → authed=true + loginLoading 回落", async () => {
-    // mount effect 探测失败，authed 保持 false；handleLogin 用 password=secret 成功
+describe("useBrowserAuth — handleLogin（用户名 + 密码）", () => {
+  it("正确用户名 + 密码 → authed=true + loginLoading 回落", async () => {
+    // mount 探测失败，authed 保持 false；handleLogin 用 admin/secret 成功
     const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       if (url.includes("/api/session")) return mockResponse(false);
       const body = init?.body ? JSON.parse(init.body as string) : {};
-      return mockResponse(body.password === "secret");
+      return mockResponse(body.username === "admin" && body.password === "secret");
     });
     vi.stubGlobal("fetch", fetchMock);
 
     const { result } = renderHook(() => useBrowserAuth());
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     expect(result.current.authed).toBe(false);
 
-    act(() => result.current.setLoginPassword("secret"));
+    act(() => {
+      result.current.setLoginUsername("admin");
+      result.current.setLoginPassword("secret");
+    });
     await act(async () => { await result.current.handleLogin(); });
 
     expect(result.current.authed).toBe(true);
     expect(result.current.loginLoading).toBe(false);
     expect(result.current.loginError).toBeNull();
+
+    // 确认请求体携带 username + password
+    const loginCall = fetchMock.mock.calls.find((c) => (c[0] as string).includes("/api/login"));
+    const body = JSON.parse((loginCall![1] as RequestInit).body as string);
+    expect(body).toEqual({ username: "admin", password: "secret" });
   });
 
-  it("密码错误 → loginError 设置 + authed 保持 false", async () => {
+  it("错误凭据 → loginError 设置 + authed 保持 false", async () => {
     const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       if (url.includes("/api/session")) return mockResponse(false);
       const body = init?.body ? JSON.parse(init.body as string) : {};
-      if (body.password === "wrong") return mockResponse(false, { error: "密码错误" });
-      return mockResponse(false); // mount effect 的 dev 登录 password=""
+      if (body.username === "admin" && body.password === "wrong") {
+        return mockResponse(false, { error: "用户名或密码错误" });
+      }
+      return mockResponse(false);
     });
     vi.stubGlobal("fetch", fetchMock);
 
     const { result } = renderHook(() => useBrowserAuth());
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
 
-    act(() => result.current.setLoginPassword("wrong"));
+    act(() => {
+      result.current.setLoginUsername("admin");
+      result.current.setLoginPassword("wrong");
+    });
     await act(async () => { await result.current.handleLogin(); });
 
     expect(result.current.authed).toBe(false);
-    expect(result.current.loginError).toBe("密码错误");
+    expect(result.current.loginError).toBe("用户名或密码错误");
     expect(result.current.loginLoading).toBe(false);
   });
 
@@ -139,15 +119,18 @@ describe("useBrowserAuth — handleLogin", () => {
     const fetchMock = vi.fn((url: string, init?: RequestInit) => {
       if (url.includes("/api/session")) return Promise.resolve(mockResponse(false));
       const body = init?.body ? JSON.parse(init.body as string) : {};
-      if (body.password === "secret") return Promise.reject(new Error("net"));
+      if (body.username === "admin" && body.password === "secret") return Promise.reject(new Error("net"));
       return Promise.resolve(mockResponse(false));
     });
     vi.stubGlobal("fetch", fetchMock);
 
     const { result } = renderHook(() => useBrowserAuth());
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
 
-    act(() => result.current.setLoginPassword("secret"));
+    act(() => {
+      result.current.setLoginUsername("admin");
+      result.current.setLoginPassword("secret");
+    });
     await act(async () => { await result.current.handleLogin(); });
 
     expect(result.current.authed).toBe(false);

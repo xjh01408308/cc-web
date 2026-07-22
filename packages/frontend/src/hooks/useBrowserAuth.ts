@@ -1,10 +1,10 @@
 import { useState, useCallback, useEffect, useRef } from "react";
-import { isDevelopment } from "../utils/environment";
 
-// 浏览器层认证（httpOnly cookie 访问密码）。与节点层认证（useNodeAuth，PR-5）
+// 浏览器层认证（用户名 + 密码登录，httpOnly cookie session）。与节点层认证（useNodeAuth，PR-5）
 // 是两套独立 state，不合 useAuth —— "auth" 是 overloaded 词，见 CONTEXT.md。
 export function useBrowserAuth() {
   const [authed, setAuthed] = useState(false);
+  const [loginUsername, setLoginUsername] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
   const [loginError, setLoginError] = useState<string | null>(null);
   const [loginLoading, setLoginLoading] = useState(false);
@@ -33,24 +33,14 @@ export function useBrowserAuth() {
     return resp;
   }, [clearSession]);
 
-  // 初始化：httpOnly cookie 不可被 JS 读取，先探测现有 session；未登录时仅在 dev 模式尝试
-  // 空密码自动登录。prod 下 RELAY_PASSWORD 非空，空密码必然 401，跳过以避免每次打开页面的无谓日志噪音。
+  // 初始化：httpOnly cookie 不可被 JS 读取，探测现有 session 是否仍有效。
+  // dev 模式由 relay 侧 getSession 旁路（/api/session 直接返回 ok），故无需前端自动登录。
   useEffect(() => {
     (async () => {
       try {
         const r = await fetch("/api/session", { credentials: "include" });
-        if (r.ok) { setAuthed(true); return; }
-      } catch { /* 网络异常，继续尝试自动登录（仅 dev） */ }
-      if (!isDevelopment()) return;
-      try {
-        const r = await fetch("/api/login", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ password: "" }),
-          credentials: "include",
-        });
         if (r.ok) setAuthed(true);
-      } catch { /* 停留在登录页 */ }
+      } catch { /* 网络异常，停留在登录页 */ }
     })();
   }, []);
 
@@ -61,7 +51,7 @@ export function useBrowserAuth() {
       const resp = await fetch("/api/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password: loginPassword }),
+        body: JSON.stringify({ username: loginUsername, password: loginPassword }),
         credentials: "include",
       });
       if (resp.ok) {
@@ -75,7 +65,7 @@ export function useBrowserAuth() {
     } finally {
       setLoginLoading(false);
     }
-  }, [loginPassword]);
+  }, [loginUsername, loginPassword]);
 
   const handleLogout = useCallback(() => {
     fetch("/api/logout", { method: "POST", credentials: "include" }).catch(() => {});
@@ -84,6 +74,8 @@ export function useBrowserAuth() {
 
   return {
     authed,
+    loginUsername,
+    setLoginUsername,
     loginPassword,
     setLoginPassword,
     loginError,
