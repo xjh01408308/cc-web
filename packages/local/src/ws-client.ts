@@ -1,6 +1,6 @@
 import { WebSocket } from 'ws';
 import { readFileSync } from 'node:fs';
-import { RELAY_URL, NODE_ID, NODE_SECRET, WORKSPACE_ROOT, RECONNECT_DELAY, MAX_RECONNECT_DELAY, RELAY_CA_CERT } from './config.js';
+import { RELAY_URL, NODE_ID, NODE_SECRET, WORKSPACE_ROOT, RECONNECT_DELAY, MAX_RECONNECT_DELAY, RELAY_CA_CERT, RELAY_IDLE_TIMEOUT_MS } from './config.js';
 import type { LocalCommand, LocalControl, LocalEvent } from './types.js';
 import { LocalEventType, LocalControlType } from './types.js';
 
@@ -12,6 +12,10 @@ const READY_STATE_LABEL: Record<number, string> = {
 
 let ws: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+// relay 链路假死监测（T7）：dead-man 定时器——每次收到 relay 消息就重新计时，
+// 超过 RELAY_IDLE_TIMEOUT_MS 没收到任何消息（Ping/命令）即认定 relay 假死，主动断开走重连。
+// 复用现有 relay→local Ping 协议，不加新消息类型；跨公网 TCP 假死时 local 侧 ws 仍 OPEN 无感知，靠此兜底。
+let idleTimer: ReturnType<typeof setTimeout> | null = null;
 let currentDelay = RECONNECT_DELAY;
 let reconnectAttempt = 0;       // 重连次数计数器
 let connectTime: Date | null = null;  // 本次连接建立时间
@@ -59,9 +63,14 @@ function connect(): void {
 
     // 注册：带预注册凭证（nodeId + nodeSecret），替代已废弃的全局 RELAY_TOKEN
     send({ type: LocalEventType.Register, nodeId: NODE_ID, nodeSecret: NODE_SECRET, workspaceRoot: WORKSPACE_ROOT });
+    // 连接建立即开始监测 relay 假死（即便 relay 建连后立刻静默也能在阈值内断开）
+    armIdleTimer();
   });
 
   ws.on('message', (raw) => {
+    // 任何收到的字节都证明链路活着（TCP 假死 = 无字节流），先重置假死计时再解析——
+    // 即便 JSON 解析失败，字节已到也说明 relay↔local 链路未断
+    armIdleTimer();
     try {
       const msg = JSON.parse(raw.toString());
       if (msg.type === LocalControlType.Ping) {
@@ -84,6 +93,7 @@ function connect(): void {
   });
 
   ws.on('close', (code, reason) => {
+    clearIdleTimer();
     const duration = connectTime ? `${Math.round((Date.now() - connectTime.getTime()) / 1000)}s` : '未知';
     const reasonStr = reason ? reason.toString('utf-8').substring(0, 100) : '(无)';
     console.log(`[ws-client] 连接已断开 | 本次持续: ${duration} | closeCode: ${code} | reason: ${reasonStr}`);
@@ -121,6 +131,24 @@ function scheduleReconnect(): void {
   }, currentDelay);
 }
 
+// 假死定时器：收到 relay 消息即重新计时，超阈值未收到 → 主动断开（close 回调随后走指数退避重连）。
+// 单次 armed（每次先 clear 再 set），随连接生命周期清理（open arm / message re-arm / close clear）。
+function armIdleTimer(): void {
+  clearIdleTimer();
+  idleTimer = setTimeout(() => {
+    idleTimer = null;
+    console.warn(`[ws-client] relay 链路假死（${RELAY_IDLE_TIMEOUT_MS / 1000}s 未收到任何消息），主动断开走重连`);
+    if (ws) ws.close();
+  }, RELAY_IDLE_TIMEOUT_MS);
+}
+
+function clearIdleTimer(): void {
+  if (idleTimer) {
+    clearTimeout(idleTimer);
+    idleTimer = null;
+  }
+}
+
 export function start(): void {
   connect();
 }
@@ -130,6 +158,7 @@ export function stop(): void {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
   }
+  clearIdleTimer();
   if (ws) {
     ws.onclose = null;
     ws.onerror = null;

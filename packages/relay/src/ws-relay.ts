@@ -10,6 +10,7 @@ import { NodeStore } from './node-store.js';
 import { AssignmentStore } from './assignment-store.js';
 import { filterVisibleNodes, canOperateNode } from './authz.js';
 import type { UserRole } from './user-store.js';
+import { RELAY_PING_INTERVAL_MS, RELAY_LOCAL_IDLE_TIMEOUT_MS } from './config.js';
 
 /** browser WS 连接携带的登录用户身份（index.ts 在 WS 握手处从 session 读出后注入）。 */
 export interface BrowserSession {
@@ -30,11 +31,10 @@ const ANONYMOUS_ADMIN: BrowserSession = { userId: '', username: '', role: 'admin
 /** admin 调用 filterVisibleNodes 时传入的占位空集（admin 分支不读它，省一次 DB 查询）。 */
 const EMPTY_NODE_SET = new Set<string>();
 
+// browser↔relay 心跳间隔（协议级 ws.ping()，浏览器自动回 pong）。
+// Node↔Relay 心跳已改为 config 驱动（RELAY_PING_INTERVAL_MS，见 T7/#26）；browser 心跳不在此次范围。
 const PING_INTERVAL_MS = 30000;
 const HTTP_REQUEST_TIMEOUT_MS = 5000;
-// local 链路假死判定阈值：跨公网链路可能 TCP 假死（两端 ws 仍 OPEN 但中间断），
-// 超过此时间没收到 local 任何消息（含 pong）→ 主动关闭触发 local ws-client 重连重建。
-const LOCAL_IDLE_TIMEOUT_MS = 90000;
 const BROWSER_REQUEST_TIMEOUT_MS = 10000;
 
 /**
@@ -522,10 +522,10 @@ export class ConnectionHandler {
       if (ws.readyState === WebSocket.OPEN) {
         this.send(ws, { type: LocalControlType.Ping });
         // 跨公网链路可能 TCP 假死（local 侧 ws 仍 OPEN，故 local 端无重连日志）：
-        // 超过 LOCAL_IDLE_TIMEOUT_MS 没收到 local 任何消息 → 主动关闭，触发 local
+        // 超过 RELAY_LOCAL_IDLE_TIMEOUT_MS（可配）没收到 local 任何消息 → 主动关闭，触发 local
         // ws-client 重连重建一条干净链路；否则 relay 会一直往死连接上发命令必然超时
         const last = this.states.lastSeenOf(ws);
-        if (last && Date.now() - last >= LOCAL_IDLE_TIMEOUT_MS) {
+        if (last && Date.now() - last >= RELAY_LOCAL_IDLE_TIMEOUT_MS) {
           const idle = Math.round((Date.now() - last) / 1000);
           console.warn(`[relay] local 链路假死（${idle}s 无消息），主动关闭重建 | IP: ${ip}`);
           clearInterval(heartbeat);
@@ -535,7 +535,7 @@ export class ConnectionHandler {
       } else {
         clearInterval(heartbeat);
       }
-    }, PING_INTERVAL_MS);
+    }, RELAY_PING_INTERVAL_MS);
   }
 }
 
