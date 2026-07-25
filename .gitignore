@@ -13,3 +13,7 @@ crystalline-humming-sedgewick.md
 .claude/
 .idea/
 *.tsbuildinfo
+
+# 打包部署（本地构建产物与部署配置）
+.env.deploy
+cc-web.tar.gz
