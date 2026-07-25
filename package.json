@@ -9,6 +9,8 @@
     "dev:local": "npm -w packages/local run dev",
     "dev:frontend": "npm -w packages/frontend run dev",
     "build:frontend": "npm -w packages/frontend run build",
+    "pack": "bash scripts/pack.sh",
+    "deploy": "bash scripts/pack.sh && bash scripts/deploy.sh",
     "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present"
   },

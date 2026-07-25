@@ -183,6 +183,8 @@ sudo nginx -t && sudo systemctl reload nginx
 | `npm run dev:local` | 单独启动本地服务 |
 | `npm run dev:frontend` | 单独启动前端 Vite 开发服务器 (:5173) |
 | `npm run build:frontend` | 构建前端生产版本到 dist/ |
+| `npm run pack` | 本地打包：构建前端 + 打 tar（`cc-web.tar.gz`）|
+| `npm run deploy` | 打包 + 部署到云服务器（一条龙，高频迭代）|
 
 ## 项目结构
 
@@ -310,27 +312,70 @@ data/sessions/
 
 ## 部署到云服务器
 
+推荐用 `npm run deploy`（打包 + 部署一条龙）。涉及脚本：`scripts/pack.sh`（本地构建前端 + 打 tar）、`scripts/deploy.sh`（上传 + 停旧 + 备份 + 解压 + 装依赖 + 起新 relay）、`scripts/restart-relay.sh`（服务器侧重启 relay）。
+
+部署只覆盖**代码与前端产物**——`packages/relay/.env`、`data/cc-web.db`、`node_modules`、nginx 配置与证书全部原样保留。
+
+### 前提
+
+- 本地已 `npm install`。
+- 服务器 `DEPLOY_PATH` 指向**已存在**的 cc-web 部署目录，含已配好的 `packages/relay/.env`（`INITIAL_ADMIN_PASSWORD`、`RELAY_PORT` 等）与 `packages/relay/data/cc-web.db`（用户/节点/授权）。
+- 服务器已配好 nginx + 证书（见 `nginx.conf.example`），relay 监听 `127.0.0.1:3001` 由 nginx 反代 `443 → 3001`。
+
+> ⚠️ 若 `DEPLOY_PATH` 指向全新空目录，relay 起来是**空库**——需重新配置 admin、重新预注册所有节点。
+
+### 首次部署
+
+1. 配置部署目标：
+   ```bash
+   cp .env.deploy.example .env.deploy
+   ```
+   编辑 `.env.deploy`：
+   ```bash
+   DEPLOY_HOST=115.191.34.123        # 服务器地址
+   DEPLOY_USER=root                  # ssh 用户
+   DEPLOY_KEY=                       # 私钥路径；留空用 ssh-agent / ~/.ssh 默认密钥
+   DEPLOY_PATH=/your/existing/path   # 服务器上现有 cc-web 目录（绝对路径）
+   ```
+
+2. 一键部署：
+   ```bash
+   npm run deploy
+   ```
+   自动完成：构建前端 → 打 tar → 上传 → 停旧 relay + 备份 `.env`/`data` → 清旧代码 + 解压 + 装依赖 → 起新 relay。
+
+   首次会 `pkill` 掉旧的 `restart-cloud.sh` 跑的 relay、由新 tsx 进程接管；nginx / 证书 / `cc-web.conf` 不动。
+
+3. 浏览器开 `https://<DEPLOY_HOST>` 登录验证。
+
+### 日常迭代部署
+
+改完代码，本地一条命令：
 ```bash
-# 1. 上传整个项目（或至少 packages/relay + packages/frontend + restart-cloud.sh）
-
-# 2. 配置 packages/relay/.env
-#    NODE_ENV=production
-#    INITIAL_ADMIN_PASSWORD=<管理员密码>
-#    RELAY_PORT=3001
-
-# 3. 安装依赖、构建前端、启动
-npm install
-npm run build:frontend
-./restart-cloud.sh
-
-# 4. 配置 nginx + HTTPS（详见 nginx.conf.example）
-sudo cp nginx.conf.example /etc/nginx/conf.d/cc-web.conf
-# 编辑配置替换域名后：
-sudo certbot --nginx -d your-domain.com
-sudo nginx -t && sudo systemctl reload nginx
+npm run deploy
 ```
+浏览器刷新即可。每次自动备份配置/数据、增量装依赖、清理已删除的文件、重启 relay。
 
-本地节点只需项目文件和 `restart-local.sh`：
+### 仅打包（不部署）
+
+```bash
+npm run pack
+```
+产出 `cc-web.tar.gz`（仅代码 + 前端产物，约 250K）。
+
+### 部署失败恢复
+
+部署中途失败时 relay 停在停止态，`.env`/`data` 已备份到服务器 `$DEPLOY_PATH/backup/`：
+```bash
+ssh <DEPLOY_USER>@<DEPLOY_HOST>
+cd <DEPLOY_PATH>
+cp -a backup/.env backup/data packages/relay/
+```
+修复后重新 `npm run deploy`。
+
+---
+
+本地节点（local）部署不变，仍用 `restart-local.sh`：
 
 ```bash
 # 本地开发机上

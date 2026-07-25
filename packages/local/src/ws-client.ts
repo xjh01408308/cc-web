@@ -51,7 +51,16 @@ function connect(): void {
 
   const opts: { ca?: Buffer } = {};
   if (RELAY_CA_CERT) {
-    opts.ca = readFileSync(RELAY_CA_CERT);
+    try {
+      opts.ca = readFileSync(RELAY_CA_CERT);
+    } catch (err) {
+      // RELAY_CA_CERT 配错（指向目录/文件不存在/无权限）时 readFileSync 抛 EISDIR/ENOENT 等，
+      // 原始报错很不直观；且这种配置错误每次重连都会复现，故 fail fast 给明确提示后退出。
+      const code = (err as NodeJS.ErrnoException).code;
+      console.error(`[ws-client] 读取 TLS CA 证书失败：RELAY_CA_CERT=${RELAY_CA_CERT}`);
+      console.error(`  必须指向证书文件本身，不能是目录。原始错误: ${code || err}`);
+      process.exit(1);
+    }
   }
   ws = new WebSocket(RELAY_URL, opts);
 
