@@ -43,10 +43,11 @@ ssh "${SSH_OPTS[@]}" "$TARGET" "cd '$DEPLOY_PATH' && \
   tar -xzf cc-web.tar.gz && rm -f cc-web.tar.gz && \
   npm install --omit=dev"
 
-echo "=== [4/5] 确保配置（首次部署生成 packages/relay/.env）==="
-# 复用现有 .env；仅当不存在（全新部署）时生成。
-# admin 密码取自本地 .env.deploy 的 DEPLOY_INITIAL_ADMIN_PASSWORD（不硬编码弱密码），
-# 经 ssh stdin 写入（不暴露在远程命令行/ps），文件权限 600。
+echo "=== [4/5] 确保配置（首次部署从 .env.example 生成 packages/relay/.env）==="
+# 复用现有 .env；仅当不存在（全新部署）时生成。.env.example 随部署包上传（见 pack.sh）。
+# 生成的 .env = .env.example 全文（含全部参数 + 注释，运维可直接调整），仅把密码占位换成真值。
+# admin 密码取自本地 .env.deploy 的 DEPLOY_INITIAL_ADMIN_PASSWORD（不硬编码弱密码）：
+# 本地 awk 从 ENVIRON 读密码注入后，经 ssh stdin 写入 → 密码不出现在任何进程命令行（不落本地/远程 ps）。
 if ssh "${SSH_OPTS[@]}" "$TARGET" "cd '$DEPLOY_PATH' && [ -f packages/relay/.env ]"; then
   echo '  复用现有 packages/relay/.env'
 else
@@ -54,9 +55,13 @@ else
     echo '  ✗ 全新部署需在 .env.deploy 设置 DEPLOY_INITIAL_ADMIN_PASSWORD（首次 admin 密码，登录后请改）'
     exit 1
   fi
-  printf 'NODE_ENV=production\nINITIAL_ADMIN_PASSWORD=%s\nRELAY_PORT=3001\n' "$DEPLOY_INITIAL_ADMIN_PASSWORD" | \
+  awk '
+    BEGIN { p = ENVIRON["DEPLOY_INITIAL_ADMIN_PASSWORD"] }
+    /^INITIAL_ADMIN_PASSWORD=/ { print "INITIAL_ADMIN_PASSWORD=" p; next }
+    { print }
+  ' "$ROOT/packages/relay/.env.example" | \
     ssh "${SSH_OPTS[@]}" "$TARGET" "cd '$DEPLOY_PATH' && mkdir -p packages/relay && cat > packages/relay/.env && chmod 600 packages/relay/.env"
-  echo '  [!] 已生成 packages/relay/.env（权限 600）；admin 初始密码 = DEPLOY_INITIAL_ADMIN_PASSWORD，请登录后修改'
+  echo '  [!] 已从 .env.example 生成 packages/relay/.env（权限 600）；admin 初始密码 = DEPLOY_INITIAL_ADMIN_PASSWORD，请登录后修改'
 fi
 
 echo "=== [5/5] 启动 relay（scripts/restart-relay.sh）==="

@@ -17,11 +17,13 @@ FILES=(
   package.json
   packages/relay/package.json
   packages/relay/src
+  packages/relay/.env.example
   packages/shared/package.json
   packages/shared/src
   packages/frontend/package.json
   packages/frontend/dist
   scripts/restart-relay.sh
+  scripts/stop-relay.sh
 )
 [ -f "$ROOT/package-lock.json" ] && FILES+=(package-lock.json)
 
