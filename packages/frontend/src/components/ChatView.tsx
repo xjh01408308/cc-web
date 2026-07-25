@@ -126,13 +126,13 @@ export function ChatView() {
 
           // 加载该节点的项目和会话
           authFetch(`/api/projects?nodeId=${encodeURIComponent(restoreNodeId)}`)
-            .then((r) => r.json())
+            .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
             .then((projData) => {
               setProjects(projData as ProjectInfo[]);
             })
             .catch(() => {});
           authFetch(`/api/sessions?nodeId=${encodeURIComponent(restoreNodeId)}`)
-            .then((r) => r.json())
+            .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
             .then((sessData: SessionInfo[]) => {
               setSessions(sessData);
               // 恢复上次的会话（含历史消息）
@@ -305,12 +305,12 @@ export function ChatView() {
 
       // 加载该节点的项目和会话
       authFetch(`/api/projects?nodeId=${encodeURIComponent(nodeId)}`)
-        .then((r) => r.json())
+        .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
         .then((data) => setProjects(data as ProjectInfo[]))
         .catch(() => {});
 
       authFetch(`/api/sessions?nodeId=${encodeURIComponent(nodeId)}`)
-        .then((r) => r.json())
+        .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
         .then((data) => setSessions(data as SessionInfo[]))
         .catch(() => {});
     },
