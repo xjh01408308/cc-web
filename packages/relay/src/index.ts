@@ -16,7 +16,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import { WebSocketServer } from 'ws';
-import { RELAY_PORT, RELAY_BROWSER_TOKEN, STATIC_DIR, INITIAL_ADMIN_USER, INITIAL_ADMIN_PASSWORD, isDevMode } from './config.js';
+import { RELAY_PORT, RELAY_BROWSER_TOKEN, STATIC_DIR, INITIAL_ADMIN_USER, INITIAL_ADMIN_PASSWORD, isDevMode, RELAY_WS_MAX_PAYLOAD } from './config.js';
 import { serveStatic } from './static.js';
 import { handleBrowserConnection, handleLocalConnection, requestLocal, getOnlineNodesForUser, initRelay } from './ws-relay.js';
 import { UserStore, DEFAULT_USER_DB_PATH, type UserRole } from './user-store.js';
@@ -278,9 +278,10 @@ const server = http.createServer(async (req, res) => {
 });
 
 // WebSocket: 浏览器连接 → /ws/browser
-const browserWss = new WebSocketServer({ noServer: true });
+// maxPayload：ws 库对超限帧直接 close 1009，避免 ws-relay.ts 里 JSON.parse(raw) 解析超大消息时 OOM。
+const browserWss = new WebSocketServer({ noServer: true, maxPayload: RELAY_WS_MAX_PAYLOAD });
 // WebSocket: 本地服务连接 → /ws/local
-const localWss = new WebSocketServer({ noServer: true });
+const localWss = new WebSocketServer({ noServer: true, maxPayload: RELAY_WS_MAX_PAYLOAD });
 
 function getClientIp(req: http.IncomingMessage): string {
   const forwarded = req.headers['x-forwarded-for'] as string | undefined;
