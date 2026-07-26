@@ -24,6 +24,7 @@ import { NodeStore, DEFAULT_NODE_DB_PATH } from './node-store.js';
 import { AssignmentStore, DEFAULT_ASSIGNMENT_DB_PATH } from './assignment-store.js';
 import { canOperateNode } from './authz.js';
 import { handleAdminUsersRoute, handleAdminNodesRoute } from './admin-routes.js';
+import { handleMeRoute } from './me-routes.js';
 import { jsonResponse, readBody } from './http-utils.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -158,6 +159,13 @@ const server = http.createServer(async (req, res) => {
     const session = getSession(req);
     if (await handleAdminUsersRoute(req, res, { session, userStore, assignmentStore })) return;
     if (await handleAdminNodesRoute(req, res, { session, nodeStore, assignmentStore })) return;
+  }
+
+  // /api/me/* —— 用户自助路由（issue #37 改密）：守卫为「已登录即可」（无 session→401），
+  // 不要求 admin；userId 严格取自 session。守卫与逻辑均在 me-routes 内。
+  if (req.url?.startsWith('/api/me/')) {
+    const session = getSession(req);
+    if (await handleMeRoute(req, res, { session, userStore })) return;
   }
 
   // 登录端点：用户名 + 密码查 users 表（scrypt 校验），通过后下发 httpOnly cookie。

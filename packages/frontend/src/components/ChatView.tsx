@@ -20,6 +20,7 @@ import { ModelPicker } from "./ModelPicker";
 import { PermissionDialog } from "./PermissionDialog";
 import { GitDiffModal } from "./GitDiffModal";
 import { FileViewerModal } from "./FileViewerModal";
+import { UserMenu } from "./UserMenu";
 
 const KNOWN_MODELS = [
   { id: "claude-opus-4-5", name: "Claude Opus 4.5" },
@@ -57,6 +58,7 @@ export function ChatView() {
     loginLoading,
     authFetch,
     handleLogin,
+    handleLogout,
     initialLoadDone,
   } = useBrowserAuth();
 
@@ -668,16 +670,26 @@ export function ChatView() {
               {activeSessionId ? "会话中" : "cc-web"}
             </span>
           )}
-          {/* admin 入口：仅 admin 可见（UX 隐藏；授权由 relay 侧 requireAdmin 强制） */}
-          {currentUser?.role === "admin" && (
-            <a
-              href="/admin"
-              className="ml-auto text-xs px-2 py-1 rounded-md text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-700"
-              title="用户管理"
-            >
-              管理
-            </a>
-          )}
+          {/* 右侧：admin 的「管理」链接原位保留 + 所有角色的用户菜单（issue #38）。
+              admin 入口仅 admin 可见（UX 隐藏；授权由 relay 侧 requireAdmin 强制）。 */}
+          <div className="ml-auto flex items-center gap-2">
+            {currentUser?.role === "admin" && (
+              <a
+                href="/admin"
+                className="text-xs px-2 py-1 rounded-md text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-700"
+                title="用户管理"
+              >
+                管理
+              </a>
+            )}
+            {currentUser && (
+              <UserMenu
+                currentUser={currentUser}
+                onLogout={handleLogout}
+                authFetch={authFetch}
+              />
+            )}
+          </div>
         </div>
         <ChatMessages messages={messages} isLoading={isLoading} />
         <StatusBar

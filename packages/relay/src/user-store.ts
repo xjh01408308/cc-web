@@ -154,6 +154,24 @@ export class UserStore {
   }
 
   /**
+   * 修改密码：先验证当前密码，通过后复用 resetPassword 写入新密码（不引入新密码学路径）。
+   * 这是用户自助改密（POST /api/me/password，见 me-routes）的领域落点——与 admin 重置别人
+   * 密码（resetPassword）形成术语二分（见 CONTEXT.md）：
+   *   - changePassword：改自己、必须验旧、对所有角色（含 admin）一致
+   *   - resetPassword：admin 改别人、不验旧、目标只能是普通 user
+   *
+   * 返回值：旧密码正确→true（存储哈希已变更）；旧密码错或 id 不存在→false（原哈希不变）。
+   * 旧密码错与 id 不存在同返回 false，避免调用方据此区分 id 是否存在（与 authenticate 一致）。
+   */
+  changePassword(id: string, currentPassword: string, newPassword: string): boolean {
+    const existing = this.getUserById(id);
+    if (!existing) return false;
+    if (!verifyPassword(currentPassword, existing.password_hash)) return false;
+    this.resetPassword(id, newPassword);
+    return true;
+  }
+
+  /**
    * 删除用户。命中返回 true，未命中返回 false。
    * 管理端调用前应自行校验目标角色（admin 只能删普通 user，见 admin-routes）。
    */

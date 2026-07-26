@@ -44,6 +44,14 @@ _Avoid_: 账号, account
 把某 Node 授权给某 User 的关系，多对多（一个 Node 可授权多个 User，一个 User 可持有多个 Node）。是唯一的操作授权机制——被 Assignment 的 user 即可完全操作该 Node。
 _Avoid_: 分配（作为术语）
 
+**修改密码（changePassword）**:
+用户改自己的登录密码；必须先验证当前密码，对所有角色（含 admin）一致。
+_Avoid_: 改密（口语），与「重置密码」混用
+
+**重置密码（resetPassword）**:
+admin 改某个普通 user 的密码；不需该 user 的当前密码，目标只能是普通 user。
+_Avoid_: 重置（单独使用），与「修改密码」混用
+
 ## 业务实体
 
 **Project**:

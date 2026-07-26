@@ -158,3 +158,37 @@ describe('UserStore — admin CRUD（issue #22）', () => {
     expect(store.deleteUser('nope')).toBe(false);
   });
 });
+
+// 用户自助改密（issue #37）：changePassword 与 resetPassword 形成术语二分（见 CONTEXT.md）。
+describe('UserStore — changePassword（issue #37 自助改密）', () => {
+  it('旧密码正确 → 返回 true，存储哈希已变更（新密码可用、旧密码失效）', () => {
+    const store = makeStore();
+    const u = store.createUser('alice', 'old-pw', 'user');
+    const ok = store.changePassword(u.id, 'old-pw', 'new-pw');
+    expect(ok).toBe(true);
+    expect(store.authenticate('alice', 'old-pw')).toBeNull();
+    expect(store.authenticate('alice', 'new-pw')).toBeTruthy();
+  });
+
+  it('旧密码错误 → 返回 false，原哈希不变（原密码仍可用）', () => {
+    const store = makeStore();
+    const u = store.createUser('alice', 'old-pw', 'user');
+    const ok = store.changePassword(u.id, 'WRONG', 'new-pw');
+    expect(ok).toBe(false);
+    expect(store.authenticate('alice', 'old-pw')).toBeTruthy();
+    expect(store.authenticate('alice', 'new-pw')).toBeNull();
+  });
+
+  it('id 不存在 → 返回 false', () => {
+    const store = makeStore();
+    expect(store.changePassword('nope', 'any', 'new')).toBe(false);
+  });
+
+  it('admin 同样可改自己密码（全角色一致，不区分角色）', () => {
+    const store = makeStore();
+    store.seedInitialAdmin('admin', 'secret');
+    const admin = store.listUsers().find((u) => u.username === 'admin')!;
+    expect(store.changePassword(admin.id, 'secret', 'new-secret')).toBe(true);
+    expect(store.authenticate('admin', 'new-secret')).toBeTruthy();
+  });
+});
