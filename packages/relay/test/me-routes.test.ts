@@ -11,7 +11,7 @@ vi.mock('../src/config.js', () => ({
   isDevMode: () => false,
 }));
 
-import { handleMeRoute, type MeSession } from '../src/me-routes.js';
+import { handleMeRoute, __resetRateLimitForTests, type MeSession } from '../src/me-routes.js';
 import { UserStore } from '../src/user-store.js';
 
 // 临时 db（与 user-store.test 同构）。
@@ -26,7 +26,10 @@ function tmpUserStore(): { store: UserStore; cleanup: () => void } {
 }
 
 const cleanups: Array<() => void> = [];
-afterEach(() => { while (cleanups.length) cleanups.pop()!(); });
+afterEach(() => {
+  while (cleanups.length) cleanups.pop()!();
+  __resetRateLimitForTests();
+});
 
 function makeStore(): UserStore {
   const t = tmpUserStore();
@@ -43,6 +46,7 @@ function mockReq(method: string, url: string, body?: unknown): IncomingMessage {
     url,
     headers: {},
     on(ev: string, cb: (...a: unknown[]) => void) { (handlers[ev] ||= []).push(cb); return req; },
+    destroy() { return req; },
   };
   setImmediate(() => {
     if (bodyStr) (handlers['data'] || []).forEach((cb) => cb(Buffer.from(bodyStr)));
@@ -151,5 +155,33 @@ describe('me-routes — POST /api/me/password', () => {
     const r = await call('POST', '/api/me/password', { session, store, body: { currentPassword: 'secret', newPassword: 'new-secret' } });
     expect(r.status).toBe(200);
     expect(store.authenticate('admin', 'new-secret')).toBeTruthy();
+  });
+
+  it('连续改密超限 → 第 6 次 429（失败尝试也计入）', async () => {
+    const store = makeStore();
+    const u = store.createUser('alice', 'pw', 'user');
+    const session: MeSession = { userId: u.id, username: 'alice', role: 'user' };
+    // 前 5 次：旧密码错→400，但每次都计入限速额度（rateLimited 在读 body 之前）
+    for (let i = 0; i < 5; i++) {
+      const r = await call('POST', '/api/me/password', { session, store, body: { currentPassword: 'WRONG', newPassword: `new-${i}` } });
+      expect(r.status).toBe(400);
+    }
+    // 第 6 次：限速命中 → 429
+    const r = await call('POST', '/api/me/password', { session, store, body: { currentPassword: 'WRONG', newPassword: 'new-5' } });
+    expect(r.status).toBe(429);
+    expect((r.json as { error: string }).error).toBe('操作过于频繁，请稍后再试');
+  });
+
+  it('请求体超 1MB → 413', async () => {
+    const store = makeStore();
+    const u = store.createUser('alice', 'pw', 'user');
+    const session: MeSession = { userId: u.id, username: 'alice', role: 'user' };
+    const r = await call('POST', '/api/me/password', {
+      session,
+      store,
+      body: { currentPassword: 'pw', newPassword: 'x'.repeat(2_000_000) },
+    });
+    expect(r.status).toBe(413);
+    expect((r.json as { error: string }).error).toBe('请求体过大');
   });
 });
