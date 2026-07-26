@@ -1,4 +1,5 @@
 import { useState, useCallback } from "react";
+import { createPortal } from "react-dom";
 import type { CurrentUser } from "../hooks/useBrowserAuth";
 
 // 修改密码弹窗（issue #38）。
@@ -62,7 +63,11 @@ export function ChangePasswordDialog({ currentUser, authFetch, onClose, onSucces
     }
   }, [canSubmit, currentPassword, newPassword, authFetch, onSuccess, onClose]);
 
-  return (
+  // 用 Portal 渲染到 document.body：本弹窗由 UserMenu 挂载在 ChatView 顶栏 header 内，而 header 带
+  // backdrop-blur-sm（backdrop-filter）——它会成为后代 position:fixed 的包含块，导致 inset-0 相对
+  // header（一条矮横条）而非视口，弹窗被锚到顶栏、顶部（含「当前密码」框）溢出视口上方而不可见。
+  // Portal 脱离该祖先，fixed 重新相对视口，弹窗正常全屏居中。
+  return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
       <div className="w-full max-w-sm bg-white dark:bg-slate-800 rounded-lg shadow-xl p-5">
         <h3 className="text-sm font-medium text-slate-700 dark:text-slate-200 mb-1">修改密码</h3>
@@ -120,6 +125,7 @@ export function ChangePasswordDialog({ currentUser, authFetch, onClose, onSucces
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
