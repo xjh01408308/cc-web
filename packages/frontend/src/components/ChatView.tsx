@@ -8,8 +8,6 @@ import { useUi } from "../hooks/useUi";
 import { useFileBrowser } from "../hooks/useFileBrowser";
 import { useSession } from "../hooks/useSession";
 import { useChat } from "../hooks/useChat";
-import { UnifiedMessageProcessor } from "../utils/UnifiedMessageProcessor";
-import { dedupConsecutiveAssistant } from "../utils/dedupMessages";
 import { saveLastView, loadLastView } from "../utils/localStorage";
 import { dispatchBrowserEvent } from "../ws/dispatcher";
 import { ProjectSidebar } from "./ProjectSidebar";
@@ -137,34 +135,14 @@ export function ChatView() {
             .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
             .then((sessData: SessionInfo[]) => {
               setSessions(sessData);
-              // 恢复上次的会话（含历史消息）
-              pendingSessionRef.current = null;
+              // 恢复上次的会话：列表只回元数据，历史消息改由 get_history 按需拉取
               if (saved?.sessionId) {
                 const target = sessData.find((s) => s.sessionId === saved.sessionId);
                 if (target) {
                   setActiveSessionId(target.sessionId);
                   setActiveProjectId(target.projectId);
-                  if (target.model) setModel(target.model);
-                  if (target.permissionMode) setPermissionMode(target.permissionMode);
-                  // 加载历史消息
-                  if (target.messages && target.messages.length > 0) {
-                    const msgs = target.messages as unknown as Record<string, unknown>[];
-                    const historyProcessor = new UnifiedMessageProcessor();
-                    const created = target.createdAt || Date.now();
-                    const timestamped = msgs
-                      .filter((m) => m.type === "claude_json" && m.data)
-                      .map((m, i) => ({
-                        ...(m.data as Record<string, unknown>),
-                        timestamp: new Date(created + i).toISOString(),
-                      }));
-                    if (timestamped.length > 0) {
-                      const processed = historyProcessor.processMessagesBatch(
-                        timestamped as Parameters<typeof historyProcessor.processMessagesBatch>[0],
-                      );
-                      setMessages(dedupConsecutiveAssistant(processed));
-                    }
-                    setHasReceivedInit(true);
-                  }
+                  pendingSessionRef.current = target.sessionId;
+                  send({ type: BrowserCommandType.GetHistory, sessionId: target.sessionId, nodeId: restoreNodeId });
                 }
               }
             })
@@ -346,7 +324,8 @@ export function ChatView() {
       setActiveProjectId(projectId);
       pendingSessionRef.current = sessionId;
       resetForSessionChange();
-      send({ type: BrowserCommandType.ListSessions, projectId, nodeId: activeNodeId || undefined });
+      // 历史消息按需拉取（列表只回元数据），由 dispatcher.handleHistory 恢复
+      send({ type: BrowserCommandType.GetHistory, sessionId, nodeId: activeNodeId || undefined });
     },
     [send, activeNodeId],
   );

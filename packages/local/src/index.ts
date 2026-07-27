@@ -62,14 +62,10 @@ onMessage((msg) => {
   switch (msg.type) {
     case LocalControlType.Registered:
       console.log('已在服务中注册');
-      // 重连后同步当前状态到前端
+      // 重连后同步当前状态到前端（列表仅元数据；历史按需 get_history）
       {
         const sessions = listSessions();
-        const sessionsWithHistory = sessions.map((s) => ({
-          ...s,
-          messages: getHistory(s.sessionId) || [],
-        }));
-        send({ type: LocalEventType.SessionsList, sessions: sessionsWithHistory });
+        send({ type: LocalEventType.SessionsList, sessions });
         const projects = listProjects();
         send({ type: LocalEventType.ProjectsList, projects });
       }
@@ -209,7 +205,7 @@ onMessage((msg) => {
       if (ok) {
         console.log(`会话已删除: ${sid.substring(0, 8)}`);
         const sessions = listSessions();
-        send({ type: LocalEventType.SessionsList, sessions: sessions.map((s) => ({ ...s, messages: getHistory(s.sessionId) || [] })) });
+        send({ type: LocalEventType.SessionsList, sessions });
         const projects = listProjects();
         send({ type: LocalEventType.ProjectsList, projects });
       }
@@ -219,11 +215,21 @@ onMessage((msg) => {
     case LocalCommandType.ListSessions: {
       const projectId = msg.projectId;
       const sessions = listSessions(projectId);
-      const sessionsWithHistory = sessions.map((s) => ({
-        ...s,
-        messages: getHistory(s.sessionId) || [],
-      }));
-      reply({ type: LocalEventType.SessionsList, sessions: sessionsWithHistory });
+      reply({ type: LocalEventType.SessionsList, sessions });
+      break;
+    }
+    case LocalCommandType.GetHistory: {
+      const sid = msg.sessionId as string;
+      if (!sid) return;
+      // 单会话按需拉历史：列表只回元数据，点击会话恢复聊天记录时才取 messages。
+      const session = getSession(sid);
+      reply({
+        type: LocalEventType.History,
+        sessionId: sid,
+        messages: getHistory(sid) || [],
+        model: session?.model,
+        permissionMode: session?.permissionMode,
+      });
       break;
     }
 

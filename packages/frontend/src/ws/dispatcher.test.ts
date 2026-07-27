@@ -227,7 +227,7 @@ describe("dispatchBrowserEvent — SessionsList", () => {
     expect(ctx.setMessages).not.toHaveBeenCalled();
   });
 
-  it("pending 匹配 + 无 active → 恢复会话状态", () => {
+  it("pending 匹配 + 无 active → 仅恢复 active/project（model/permissionMode/messages 由 History）", () => {
     const ctx = createMockContext({
       pendingSessionRef: { current: "s1" },
     });
@@ -240,8 +240,10 @@ describe("dispatchBrowserEvent — SessionsList", () => {
     );
     expect(ctx.setActiveSessionId).toHaveBeenCalledWith("s1");
     expect(ctx.setActiveProjectId).toHaveBeenCalledWith("p1");
-    expect(ctx.setModel).toHaveBeenCalledWith("m");
-    expect(ctx.setPermissionMode).toHaveBeenCalledWith("acceptEdits");
+    // 列表不再回 model/permissionMode/messages
+    expect(ctx.setModel).not.toHaveBeenCalled();
+    expect(ctx.setPermissionMode).not.toHaveBeenCalled();
+    expect(ctx.setMessages).not.toHaveBeenCalled();
   });
 
   it("pending 匹配 + 有 active → 不恢复 active", () => {
@@ -260,7 +262,7 @@ describe("dispatchBrowserEvent — SessionsList", () => {
     expect(ctx.setActiveProjectId).not.toHaveBeenCalled();
   });
 
-  it("pending 匹配 + 有 active + target 带 model/permissionMode → 仍更新二者（切换会话）", () => {
+  it("pending 匹配 + 有 active + target 带 model/permissionMode → 仍不更新二者（History 负责）", () => {
     const ctx = createMockContext({
       pendingSessionRef: { current: "s1" },
       activeSessionId: "existing",
@@ -272,54 +274,77 @@ describe("dispatchBrowserEvent — SessionsList", () => {
       }),
       ctx,
     );
-    // active 不被覆盖
     expect(ctx.setActiveSessionId).not.toHaveBeenCalled();
-    // 但 model/permissionMode 要更新（切换会话场景）
-    expect(ctx.setModel).toHaveBeenCalledWith("m");
-    expect(ctx.setPermissionMode).toHaveBeenCalledWith("bypassPermissions");
+    // model/permissionMode 改由 History 事件恢复
+    expect(ctx.setModel).not.toHaveBeenCalled();
+    expect(ctx.setPermissionMode).not.toHaveBeenCalled();
   });
+});
 
-  it("pending 匹配 + 有 messages → 加载历史 + setHasReceivedInit(true)", () => {
-    const ctx = createMockContext({
-      pendingSessionRef: { current: "s1" },
-      activeSessionId: "s1",
-    });
+describe("dispatchBrowserEvent — History（按需历史恢复）", () => {
+  it("sessionId === activeSessionId → 恢复 messages + model/permissionMode + setHasReceivedInit", () => {
+    const ctx = createMockContext({ activeSessionId: "s1" });
     dispatchBrowserEvent(
       ev({
-        type: BrowserEventType.SessionsList,
-        sessions: [
-          {
-            sessionId: "s1",
-            messages: [
-              {
-                type: "claude_json",
-                data: { type: "user", message: { role: "user", content: "hi" } },
-              },
-            ],
-          },
+        type: BrowserEventType.History,
+        sessionId: "s1",
+        model: "m",
+        permissionMode: "bypassPermissions",
+        messages: [
+          { type: "claude_json", data: { type: "user", message: { role: "user", content: "hi" } } },
         ],
       }),
       ctx,
     );
+    expect(ctx.setModel).toHaveBeenCalledWith("m");
+    expect(ctx.setPermissionMode).toHaveBeenCalledWith("bypassPermissions");
     expect(ctx.setMessages).toHaveBeenCalledTimes(1);
     expect(ctx.setHasReceivedInit).toHaveBeenCalledWith(true);
   });
 
-  it("pending 匹配 + messages 全非 claude_json → 不调 setMessages", () => {
-    const ctx = createMockContext({
-      pendingSessionRef: { current: "s1" },
-      activeSessionId: "s1",
-    });
+  it("sessionId ≠ active 且 ≠ pending → 丢弃（快速切换时旧响应不覆盖新会话）", () => {
+    const ctx = createMockContext({ activeSessionId: "s2", pendingSessionRef: { current: null } });
     dispatchBrowserEvent(
       ev({
-        type: BrowserEventType.SessionsList,
-        sessions: [
-          { sessionId: "s1", messages: [{ type: "other" }] },
+        type: BrowserEventType.History,
+        sessionId: "s1",
+        messages: [
+          { type: "claude_json", data: { type: "user", message: { role: "user", content: "hi" } } },
         ],
       }),
       ctx,
     );
     expect(ctx.setMessages).not.toHaveBeenCalled();
+    expect(ctx.setModel).not.toHaveBeenCalled();
+  });
+
+  it("messages 全非 claude_json → 不调 setMessages / setHasReceivedInit", () => {
+    const ctx = createMockContext({ activeSessionId: "s1" });
+    dispatchBrowserEvent(
+      ev({
+        type: BrowserEventType.History,
+        sessionId: "s1",
+        messages: [{ type: "other" }],
+      }),
+      ctx,
+    );
+    expect(ctx.setMessages).not.toHaveBeenCalled();
+    expect(ctx.setHasReceivedInit).not.toHaveBeenCalled();
+  });
+
+  it("sessionId === pending（即使 active 为 null）→ 恢复（初始 WS 兜底场景）", () => {
+    const ctx = createMockContext({ activeSessionId: null, pendingSessionRef: { current: "s1" } });
+    dispatchBrowserEvent(
+      ev({
+        type: BrowserEventType.History,
+        sessionId: "s1",
+        messages: [
+          { type: "claude_json", data: { type: "user", message: { role: "user", content: "hi" } } },
+        ],
+      }),
+      ctx,
+    );
+    expect(ctx.setMessages).toHaveBeenCalledTimes(1);
   });
 });
 

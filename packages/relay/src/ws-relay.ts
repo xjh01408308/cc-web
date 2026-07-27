@@ -214,6 +214,13 @@ export class ConnectionHandler {
         break;
       }
 
+      case BrowserCommandType.GetHistory: {
+        const conn = this.resolveAuthedTarget(ws, msg.nodeId, { noSelectionError: '未选择节点' });
+        if (!conn) return;
+        this.send(conn.ws, { type: LocalCommandType.GetHistory, sessionId: msg.sessionId, _reqId: this.matcher.registerBrowser(ws, 'get_history', BROWSER_REQUEST_TIMEOUT_MS) });
+        break;
+      }
+
       case BrowserCommandType.CreateProject: {
         const conn = this.resolveAuthedTarget(ws, msg.nodeId, { noSelectionError: '未选择节点' });
         if (!conn) return;
@@ -423,7 +430,8 @@ export class ConnectionHandler {
       case LocalEventType.GitStatus:
       case LocalEventType.GitDiff:
       case LocalEventType.FileTree:
-      case LocalEventType.FileContent: {
+      case LocalEventType.FileContent:
+      case LocalEventType.History: {
         const nodeId = this.states.getNodeId(ws);
         if (!nodeId) break;
         const { _reqId: _, ...broadcastMsg } = msg as unknown as Record<string, unknown>;
