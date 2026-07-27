@@ -15,6 +15,7 @@
 // 三端均直接消费本文件的 union 与常量，不再自带扁平信封类型。
 
 import type {
+  StreamResponse,
   SessionInfo,
   ProjectInfo,
   NodeInfo,
@@ -63,6 +64,8 @@ export const BrowserCommandType = {
   GetGitDiff: 'get_git_diff',
   GetFileTree: 'get_file_tree',
   GetFileContent: 'get_file_content',
+  /** 按需加载单个会话的历史消息（列表只回元数据，历史点击时拉） */
+  GetHistory: 'get_history',
 } as const;
 
 export interface BrowserChatCommand extends ChatPayload {
@@ -165,6 +168,12 @@ export interface BrowserGetFileContentCommand {
   nodeId?: string;
 }
 
+export interface BrowserGetHistoryCommand {
+  type: typeof BrowserCommandType.GetHistory;
+  sessionId: string;
+  nodeId?: string;
+}
+
 export type BrowserCommand =
   | BrowserChatCommand
   | BrowserCreateSessionCommand
@@ -181,7 +190,8 @@ export type BrowserCommand =
   | BrowserGetGitStatusCommand
   | BrowserGetGitDiffCommand
   | BrowserGetFileTreeCommand
-  | BrowserGetFileContentCommand;
+  | BrowserGetFileContentCommand
+  | BrowserGetHistoryCommand;
 
 // ===========================================================================
 // LocalCommand — 中转 → 本地（转发的下行命令；请求-响应类带 _reqId）
@@ -202,6 +212,7 @@ export const LocalCommandType = {
   GetGitDiff: 'get_git_diff',
   GetFileTree: 'get_file_tree',
   GetFileContent: 'get_file_content',
+  GetHistory: 'get_history',
 } as const;
 
 /** relay 用于把 local 的响应匹配回原始浏览器请求 */
@@ -284,6 +295,11 @@ export interface LocalGetFileContentCommand extends RequestEnvelope {
   filePath: string;
 }
 
+export interface LocalGetHistoryCommand extends RequestEnvelope {
+  type: typeof LocalCommandType.GetHistory;
+  sessionId: string;
+}
+
 export type LocalCommand =
   | LocalChatCommand
   | LocalCreateSessionCommand
@@ -298,7 +314,8 @@ export type LocalCommand =
   | LocalGetGitStatusCommand
   | LocalGetGitDiffCommand
   | LocalGetFileTreeCommand
-  | LocalGetFileContentCommand;
+  | LocalGetFileContentCommand
+  | LocalGetHistoryCommand;
 
 // ===========================================================================
 // LocalControl — 中转 → 本地（非命令控制：注册确认 / 心跳探测）
@@ -341,6 +358,8 @@ export const LocalEventType = {
   GitDiff: 'git_diff',
   FileTree: 'file_tree',
   FileContent: 'file_content',
+  /** 单会话历史消息（按需 get_history 的响应） */
+  History: 'history',
 } as const;
 
 export interface LocalRegisterEvent {
@@ -434,6 +453,16 @@ export interface LocalFileContentEvent {
   _reqId?: string;
 }
 
+/** 单会话历史消息响应（get_history）：列表只回元数据，历史点击时按需拉取。 */
+export interface LocalHistoryEvent {
+  type: typeof LocalEventType.History;
+  sessionId: string;
+  messages: StreamResponse[];
+  model?: string;
+  permissionMode?: string;
+  _reqId?: string;
+}
+
 export type LocalEvent =
   | LocalRegisterEvent
   | LocalClaudeJsonEvent
@@ -449,7 +478,8 @@ export type LocalEvent =
   | LocalGitStatusEvent
   | LocalGitDiffEvent
   | LocalFileTreeEvent
-  | LocalFileContentEvent;
+  | LocalFileContentEvent
+  | LocalHistoryEvent;
 
 /** LocalEvent 中带 `_reqId` 的请求-响应类事件（local→relay，relay 据此匹配回原始请求）。
  *  reply() 只接受这个子联合，避免给无 _reqId 的变体塞 _reqId（type hole）。 */
@@ -461,7 +491,8 @@ export type LocalResponseEvent =
   | LocalGitStatusEvent
   | LocalGitDiffEvent
   | LocalFileTreeEvent
-  | LocalFileContentEvent;
+  | LocalFileContentEvent
+  | LocalHistoryEvent;
 
 // ===========================================================================
 // BrowserEvent — 中转 → 浏览器（转发的事件注入 nodeId；另含 relay 自产事件）
@@ -483,6 +514,8 @@ export const BrowserEventType = {
   GitDiff: 'git_diff',
   FileTree: 'file_tree',
   FileContent: 'file_content',
+  /** 单会话历史消息（按需 get_history 的响应） */
+  History: 'history',
 } as const;
 
 export interface BrowserClaudeJsonEvent {
@@ -578,6 +611,16 @@ export interface BrowserFileContentEvent {
   nodeId?: string;
 }
 
+/** 单会话历史消息（get_history 响应）：dispatcher 据sessionId匹配当前活跃会话后恢复 messages。 */
+export interface BrowserHistoryEvent {
+  type: typeof BrowserEventType.History;
+  sessionId: string;
+  messages: StreamResponse[];
+  model?: string;
+  permissionMode?: string;
+  nodeId?: string;
+}
+
 export type BrowserEvent =
   | BrowserClaudeJsonEvent
   | BrowserDoneEvent
@@ -593,4 +636,5 @@ export type BrowserEvent =
   | BrowserGitStatusEvent
   | BrowserGitDiffEvent
   | BrowserFileTreeEvent
-  | BrowserFileContentEvent;
+  | BrowserFileContentEvent
+  | BrowserHistoryEvent;

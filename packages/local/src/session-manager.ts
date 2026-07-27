@@ -179,6 +179,10 @@ export function getSessionInfo(sessionId: string): SessionInfo | undefined {
 
 export function listSessions(projectId?: string): SessionInfo[] {
   const rows = db.listSessionsByProject(projectId);
+  // 列表只回元数据——历史消息按需经 get_history 单会话拉取。
+  // 早期把每个会话的完整 messages 也带上，导致一个累积数万条消息的会话会让
+  // list_sessions 的 payload 达到 20MB+，经公网 WS 传输 >5s 撞穿 HTTP 超时（503），
+  // 会话列表长时间为空。messages 只在点击会话恢复聊天记录时才需要。
   return rows.map((r) => {
     // 如果有内存中的 session，用内存数据（更实时）
     const mem = sessions.get(r.id);
@@ -193,7 +197,6 @@ export function listSessions(projectId?: string): SessionInfo[] {
       status: (r.status as 'idle' | 'running' | 'error'),
       messageCount: r.message_count,
       createdAt: r.created_at,
-      messages: mem?.messages || loadMessages(r.id),
     };
   });
 }

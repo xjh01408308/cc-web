@@ -119,6 +119,7 @@ type GitStatusEvent = Extract<BrowserEvent, { type: typeof BrowserEventType.GitS
 type GitDiffEvent = Extract<BrowserEvent, { type: typeof BrowserEventType.GitDiff }>;
 type FileTreeEvent = Extract<BrowserEvent, { type: typeof BrowserEventType.FileTree }>;
 type FileContentEvent = Extract<BrowserEvent, { type: typeof BrowserEventType.FileContent }>;
+type HistoryEvent = Extract<BrowserEvent, { type: typeof BrowserEventType.History }>;
 type StreamingEvent = Extract<
   BrowserEvent,
   {
@@ -186,6 +187,9 @@ export function dispatchBrowserEvent(event: BrowserEvent, ctx: DispatchContext):
       return;
     case BrowserEventType.FileContent:
       handleFileContent(event, ctx);
+      return;
+    case BrowserEventType.History:
+      handleHistory(event, ctx);
       return;
     case BrowserEventType.SessionEnd:
       handleSessionEnd(ctx);
@@ -283,38 +287,43 @@ function handleSessionInfo(event: SessionInfoEvent, ctx: DispatchContext): void 
 function handleSessionsList(event: SessionsListEvent, ctx: DispatchContext): void {
   if (!event.sessions) return;
   ctx.setSessions(event.sessions);
-  // 如果有待加载的会话，将其历史消息加载到聊天视图
+  // 列表现在只回元数据（无 messages）——历史消息由 get_history 的 History 事件按需恢复。
+  // 仅保留 WS 恢复活跃会话的兜底：HTTP 认证失败时靠 WS 列表把 pending 会话选中。
   const pendingId = ctx.pendingSessionRef.current;
   if (!pendingId) return;
   const target = event.sessions.find((s) => s.sessionId === pendingId);
   if (!target) return;
-  // 恢复活跃会话（HTTP 认证失败时通过 WebSocket 恢复）：仅在未选中时设置 active
   if (!ctx.activeSessionId) {
     ctx.setActiveSessionId(target.sessionId);
     ctx.setActiveProjectId(target.projectId);
   }
-  // model/permissionMode 必须在守卫外更新：切换会话时 handleSelectSession 已先
-  // setActiveSessionId 再 resetForSessionChange 清空二者，若放在守卫内则永远跳过，
-  // 导致切换后 permissionMode 停留 "" → 回退 acceptEdits 显示"读写"
-  if (target.model) ctx.setModel(target.model);
-  if (target.permissionMode) ctx.setPermissionMode(target.permissionMode);
-  if (target.messages && target.messages.length > 0) {
-    const msgs = target.messages as unknown as Record<string, unknown>[];
-    const historyProcessor = new UnifiedMessageProcessor();
-    const created = target.createdAt || Date.now();
-    // 提取 claude_json 类型的消息，取 .data 作为 SDKMessage，附上 timestamp
-    const timestamped = msgs
-      .filter((m) => m.type === "claude_json" && m.data)
-      .map((m, i) => ({
-        ...(m.data as Record<string, unknown>),
-        timestamp: new Date(created + i).toISOString(),
-      }));
-    if (timestamped.length > 0) {
-      const processed = historyProcessor.processMessagesBatch(
-        timestamped as Parameters<typeof historyProcessor.processMessagesBatch>[0],
-      );
-      ctx.setMessages(dedupConsecutiveAssistant(processed));
-    }
+}
+
+function handleHistory(event: HistoryEvent, ctx: DispatchContext): void {
+  // 仅恢复当前活跃会话（或 pending）的历史——快速连点切换时，
+  // 旧请求的 History 响应 sessionId ≠ 当前活跃会话，直接丢弃避免覆盖。
+  const sid = event.sessionId;
+  if (sid !== ctx.activeSessionId && sid !== ctx.pendingSessionRef.current) return;
+  // 切换会话时 handleSelectSession 已 resetForSessionChange 清空 model/permissionMode，
+  // 此处由 History 事件回填（后端 SessionInfo 为准，避免乐观值闪回）。
+  if (event.model) ctx.setModel(event.model);
+  if (event.permissionMode) ctx.setPermissionMode(event.permissionMode);
+  const msgs = event.messages as unknown as Record<string, unknown>[] | undefined;
+  if (!msgs || msgs.length === 0) return;
+  const historyProcessor = new UnifiedMessageProcessor();
+  const created = Date.now();
+  // 提取 claude_json 类型的消息，取 .data 作为 SDKMessage，附上 timestamp
+  const timestamped = msgs
+    .filter((m) => m.type === "claude_json" && m.data)
+    .map((m, i) => ({
+      ...(m.data as Record<string, unknown>),
+      timestamp: new Date(created + i).toISOString(),
+    }));
+  if (timestamped.length > 0) {
+    const processed = historyProcessor.processMessagesBatch(
+      timestamped as Parameters<typeof historyProcessor.processMessagesBatch>[0],
+    );
+    ctx.setMessages(dedupConsecutiveAssistant(processed));
     ctx.setHasReceivedInit(true);
   }
 }

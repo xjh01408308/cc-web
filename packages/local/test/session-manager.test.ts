@@ -103,6 +103,7 @@ import {
   stopSession,
   getSession,
   setTransport,
+  listSessions,
 } from '../src/session-manager.js';
 
 // 反转后形态：注入 mock sender 收集器到领域层（替代反转前的 vi.mock(ws-client)）
@@ -325,5 +326,29 @@ describe('stopSession — 会话结束', () => {
     expect(runner.close).toHaveBeenCalledTimes(1);
     expect(db.updateSessionStatus).toHaveBeenCalledWith(sid, 'idle');
     expect(transportEvents).toContainEqual({ type: 'session_end', sessionId: sid, reason: 'stopped' });
+  });
+});
+
+// ─── listSessions：列表仅元数据（不含 messages）──────────────────────────────
+// 回归点：早期 listSessions 给每行附 messages，导致一个累积数万条消息的会话
+// 让列表 payload 达 20MB+，经公网 WS 传输 >5s 撞穿 HTTP 超时 → 列表加载失败。
+// 历史改由 get_history 按需单会话拉取，列表只回元数据。
+describe('listSessions — 列表仅元数据', () => {
+  it('会话有历史消息时，listSessions 返回项也不带 messages', () => {
+    const sid = newSession();
+    sendMessage(sid, 'hello'); // 入队 user 消息 → 内存会话有历史
+
+    vi.mocked(db.listSessionsByProject).mockReturnValue([
+      { id: sid, project_id: PROJECT_ID, summary: '', status: 'idle', message_count: 1, created_at: 123 },
+    ]);
+
+    const list = listSessions();
+    expect(list).toHaveLength(1);
+    expect(list[0].sessionId).toBe(sid);
+    expect(list[0].messageCount).toBe(1);
+    // 关键回归：列表项不带 messages
+    expect(list[0].messages).toBeUndefined();
+    // 内存会话本身仍保留 messages（get_history 仍可取到）
+    expect(getSession(sid)?.messages.length).toBeGreaterThan(0);
   });
 });
