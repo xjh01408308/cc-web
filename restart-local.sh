@@ -23,6 +23,7 @@ echo "[2/2] 启动本地服务..."
 cd "$SCRIPT_DIR/packages/local"
 LOG="$SCRIPT_DIR/local.log"
 nohup npx tsx --env-file=.env src/index.ts >> "$LOG" 2>&1 &
+chmod 600 "$LOG"  # 收紧日志权限，防敏感输出被他人读取
 disown
 
 echo ""
