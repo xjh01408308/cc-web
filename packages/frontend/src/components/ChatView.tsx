@@ -85,6 +85,8 @@ export function ChatView() {
     taskProgress, setTaskProgress,
     permissionDenials, setPermissionDenials,
     tokenUsage, setTokenUsage,
+    isHistoryLoading, setIsHistoryLoading,
+    rawHistoryBufferRef,
     currentAssistantMessageRef,
     resetForSessionChange,
   } = useChat();
@@ -142,6 +144,7 @@ export function ChatView() {
                   setActiveSessionId(target.sessionId);
                   setActiveProjectId(target.projectId);
                   pendingSessionRef.current = target.sessionId;
+                  setIsHistoryLoading(true);
                   send({ type: BrowserCommandType.GetHistory, sessionId: target.sessionId, nodeId: restoreNodeId });
                 }
               }
@@ -244,6 +247,9 @@ export function ChatView() {
             setActiveSessionId,
             setActiveProjectId,
             setMessages,
+            send,
+            setIsHistoryLoading,
+            rawHistoryBufferRef,
             setModel,
             setPermissionMode,
             setHasReceivedInit,
@@ -263,7 +269,7 @@ export function ChatView() {
         }
       }
     },
-    [processStreamLine, hasReceivedInit, activeSessionId, activeNodeId],
+    [processStreamLine, hasReceivedInit, activeSessionId, activeNodeId, send],
   );
   handleRawMessageRef.current = handleRawMessage;
 
@@ -324,7 +330,8 @@ export function ChatView() {
       setActiveProjectId(projectId);
       pendingSessionRef.current = sessionId;
       resetForSessionChange();
-      // 历史消息按需拉取（列表只回元数据），由 dispatcher.handleHistory 恢复
+      // 历史分页加载：首页请求发出即开加载指示；dispatcher.handleHistory 据 hasMore 续拉/收尾
+      setIsHistoryLoading(true);
       send({ type: BrowserCommandType.GetHistory, sessionId, nodeId: activeNodeId || undefined });
     },
     [send, activeNodeId],
@@ -670,7 +677,7 @@ export function ChatView() {
             )}
           </div>
         </div>
-        <ChatMessages messages={messages} isLoading={isLoading} />
+        <ChatMessages messages={messages} isLoading={isLoading} isHistoryLoading={isHistoryLoading} />
         <StatusBar
           connected={connected}
           sessionId={activeSessionId}

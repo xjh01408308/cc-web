@@ -104,6 +104,7 @@ import {
   getSession,
   setTransport,
   listSessions,
+  getHistoryPage,
 } from '../src/session-manager.js';
 
 // 反转后形态：注入 mock sender 收集器到领域层（替代反转前的 vi.mock(ws-client)）
@@ -350,5 +351,72 @@ describe('listSessions — 列表仅元数据', () => {
     expect(list[0].messages).toBeUndefined();
     // 内存会话本身仍保留 messages（get_history 仍可取到）
     expect(getSession(sid)?.messages.length).toBeGreaterThan(0);
+  });
+});
+
+// ─── getHistoryPage：从最近往前分页（前端逐步刷新的后端支撑）──────────────────
+// 回归点：早期 get_history 一次性回全量 messages，大会话公网传输慢；
+// 改分页后每页只回 limit 条，前端据 hasMore/nextBefore 续拉更早的历史。
+describe('getHistoryPage — 从最近往前分页', () => {
+  function seedMessages(sid: string, n: number): void {
+    const session = getSession(sid);
+    if (!session) throw new Error('session not found');
+    for (let i = 0; i < n; i++) {
+      session.messages.push({ type: 'claude_json', data: { idx: i } });
+    }
+  }
+  const idxOf = (m: { data?: unknown }): number =>
+    (m.data as { idx: number }).idx;
+
+  it('首页(before省略) + 总数 ≤ limit：全部返回，hasMore=false', () => {
+    const sid = newSession();
+    seedMessages(sid, 5);
+    const p = getHistoryPage(sid); // 默认 limit=HISTORY_PAGE_SIZE(50)
+    expect(p.messages).toHaveLength(5);
+    expect(p.messages.map(idxOf)).toEqual([0, 1, 2, 3, 4]);
+    expect(p.hasMore).toBe(false);
+    expect(p.nextBefore).toBeUndefined();
+  });
+
+  it('总数 > limit：首页只回最近 limit 条 + hasMore=true + nextBefore=本页起始', () => {
+    const sid = newSession();
+    seedMessages(sid, 7);
+    const p = getHistoryPage(sid, 3); // 末尾 3 条 [4,7)
+    expect(p.messages.map(idxOf)).toEqual([4, 5, 6]);
+    expect(p.hasMore).toBe(true);
+    expect(p.nextBefore).toBe(4);
+  });
+
+  it('续页(before=nextBefore)：取更早的一页', () => {
+    const sid = newSession();
+    seedMessages(sid, 7);
+    const p = getHistoryPage(sid, 3, 4); // [1,4)
+    expect(p.messages.map(idxOf)).toEqual([1, 2, 3]);
+    expect(p.hasMore).toBe(true);
+    expect(p.nextBefore).toBe(1);
+  });
+
+  it('末页：剩余不足 limit 条，hasMore=false + nextBefore=undefined', () => {
+    const sid = newSession();
+    seedMessages(sid, 7);
+    const p = getHistoryPage(sid, 3, 1); // [0,1) 只剩 1 条
+    expect(p.messages.map(idxOf)).toEqual([0]);
+    expect(p.hasMore).toBe(false);
+    expect(p.nextBefore).toBeUndefined();
+  });
+
+  it('空会话：首页返回空 + hasMore=false', () => {
+    const sid = newSession();
+    const p = getHistoryPage(sid);
+    expect(p.messages).toEqual([]);
+    expect(p.hasMore).toBe(false);
+  });
+
+  it('before 越界(>total)：clamp 到 total，不返回空页', () => {
+    const sid = newSession();
+    seedMessages(sid, 3);
+    const p = getHistoryPage(sid, 5, 100); // end clamp 到 3 → [0,3) 全部
+    expect(p.messages.map(idxOf)).toEqual([0, 1, 2]);
+    expect(p.hasMore).toBe(false);
   });
 });

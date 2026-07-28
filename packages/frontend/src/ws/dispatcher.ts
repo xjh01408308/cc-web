@@ -9,6 +9,7 @@
 import type { Dispatch, SetStateAction, MutableRefObject } from "react";
 import type {
   BrowserEvent,
+  BrowserCommand,
   AllMessage,
   ChatMessage,
   SessionInfo,
@@ -17,7 +18,7 @@ import type {
   GitStatusResult,
   FileTreeNode,
 } from "../types";
-import { BrowserEventType } from "../types";
+import { BrowserEventType, BrowserCommandType } from "../types";
 import type { StreamingContext } from "../hooks/streaming/useStreamParser";
 import { UnifiedMessageProcessor } from "../utils/UnifiedMessageProcessor";
 import { dedupConsecutiveAssistant } from "../utils/dedupMessages";
@@ -89,6 +90,11 @@ export interface DispatchContext {
   setActiveSessionId: Dispatch<SetStateAction<string | null>>;
   setActiveProjectId: Dispatch<SetStateAction<string | null>>;
   setMessages: Dispatch<SetStateAction<AllMessage[]>>;
+
+  // 历史分页加载（点击会话逐步刷新；dispatcher 据 hasMore 自动续拉更早的历史）
+  send: (cmd: BrowserCommand) => void;
+  setIsHistoryLoading: Dispatch<SetStateAction<boolean>>;
+  rawHistoryBufferRef: MutableRefObject<Record<string, unknown>[]>;
 
   // 模型 / 权限 / 进度 setter
   setModel: Dispatch<SetStateAction<string>>;
@@ -304,27 +310,42 @@ function handleHistory(event: HistoryEvent, ctx: DispatchContext): void {
   // 旧请求的 History 响应 sessionId ≠ 当前活跃会话，直接丢弃避免覆盖。
   const sid = event.sessionId;
   if (sid !== ctx.activeSessionId && sid !== ctx.pendingSessionRef.current) return;
-  // 切换会话时 handleSelectSession 已 resetForSessionChange 清空 model/permissionMode，
-  // 此处由 History 事件回填（后端 SessionInfo 为准，避免乐观值闪回）。
+  // 首页才回填 model/permissionMode（续页不带，前端已持有）。
   if (event.model) ctx.setModel(event.model);
   if (event.permissionMode) ctx.setPermissionMode(event.permissionMode);
-  const msgs = event.messages as unknown as Record<string, unknown>[] | undefined;
-  if (!msgs || msgs.length === 0) return;
-  const historyProcessor = new UnifiedMessageProcessor();
-  const created = Date.now();
-  // 提取 claude_json 类型的消息，取 .data 作为 SDKMessage，附上 timestamp
-  const timestamped = msgs
+
+  // 分页：新页是更早的历史 → 提取后 prepend 到缓冲区（正序 最早..最近）。
+  // 直接用 SDKMessage 自带的 timestamp（真实历史时间）；processMessagesBatch 据此转毫秒。
+  // 早期用 Date.now()+i 伪造 timestamp，导致历史消息显示成"当前时间"。
+  const pageMsgs = (event.messages as unknown as Record<string, unknown>[]) ?? [];
+  const pageTimestamped = pageMsgs
     .filter((m) => m.type === "claude_json" && m.data)
-    .map((m, i) => ({
-      ...(m.data as Record<string, unknown>),
-      timestamp: new Date(created + i).toISOString(),
-    }));
-  if (timestamped.length > 0) {
-    const processed = historyProcessor.processMessagesBatch(
-      timestamped as Parameters<typeof historyProcessor.processMessagesBatch>[0],
+    .map((m) => m.data as Record<string, unknown>);
+  ctx.rawHistoryBufferRef.current = [...pageTimestamped, ...ctx.rawHistoryBufferRef.current];
+
+  // 整体重跑正序全量：processor 每次 new，toolUseCache 在单 batch 内正确，
+  // 避免「从最近往前」增量喂入导致 tool_use↔tool_result 跨页关联断裂。
+  if (ctx.rawHistoryBufferRef.current.length > 0) {
+    const processor = new UnifiedMessageProcessor();
+    const processed = processor.processMessagesBatch(
+      ctx.rawHistoryBufferRef.current as Parameters<typeof processor.processMessagesBatch>[0],
     );
     ctx.setMessages(dedupConsecutiveAssistant(processed));
     ctx.setHasReceivedInit(true);
+  }
+  // buffer 空（空会话 / 本页全非 claude_json）→ 不调 setMessages，保持现状
+  // （切会话时 resetForSessionChange 已清空 messages）。
+
+  // 自动续拉更早的历史；hasMore=false（或旧协议无分页字段）时停止并关闭加载指示。
+  if (event.hasMore && event.nextBefore != null) {
+    ctx.send({
+      type: BrowserCommandType.GetHistory,
+      sessionId: sid,
+      nodeId: ctx.activeNodeId || undefined,
+      before: event.nextBefore,
+    });
+  } else {
+    ctx.setIsHistoryLoading(false);
   }
 }
 

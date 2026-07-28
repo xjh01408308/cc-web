@@ -23,6 +23,7 @@ import {
   listSessions,
   getSession,
   getHistory,
+  getHistoryPage,
   generateSummary,
   loadPersistedSessions,
   createProject,
@@ -221,14 +222,18 @@ onMessage((msg) => {
     case LocalCommandType.GetHistory: {
       const sid = msg.sessionId as string;
       if (!sid) return;
-      // 单会话按需拉历史：列表只回元数据，点击会话恢复聊天记录时才取 messages。
-      const session = getSession(sid);
+      // 分页拉历史：列表只回元数据，点击会话逐步刷新（前端按 hasMore/nextBefore 续拉）。
+      // 首页（before 省略）才回填 model/permissionMode，续页不带（前端已持有）。
+      const page = getHistoryPage(sid, msg.limit, msg.before);
+      const isFirstPage = msg.before == null;
+      const session = isFirstPage ? getSession(sid) : undefined;
       reply({
         type: LocalEventType.History,
         sessionId: sid,
-        messages: getHistory(sid) || [],
-        model: session?.model,
-        permissionMode: session?.permissionMode,
+        messages: page.messages,
+        hasMore: page.hasMore,
+        nextBefore: page.nextBefore,
+        ...(isFirstPage ? { model: session?.model, permissionMode: session?.permissionMode } : {}),
       });
       break;
     }

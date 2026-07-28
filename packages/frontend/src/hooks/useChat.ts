@@ -19,10 +19,15 @@ export function useChat() {
   const [taskProgress, setTaskProgress] = useState<TaskProgress | null>(null);
   const [permissionDenials, setPermissionDenials] = useState<PermissionDenial[] | null>(null);
   const [tokenUsage, setTokenUsage] = useState<TokenUsage | null>(null);
+  // 历史分页加载指示（点击会话→首页请求置 true；hasMore=false 置 false）
+  const [isHistoryLoading, setIsHistoryLoading] = useState(false);
 
   // 流式聚合：跨消息累积当前 assistant 消息（增量更新）。
   // dispatcher 与协调层 handleAbort 直接读写 .current。
   const currentAssistantMessageRef = useRef<ChatMessage | null>(null);
+  // 历史分页缓冲区：按时间正序（最早..最近）累积已收到的原始消息；
+  // 每页（更早的历史）prepend 到头部，dispatcher 据此整体重跑 processor。
+  const rawHistoryBufferRef = useRef<Record<string, unknown>[]>([]);
 
   // 切换会话/节点时重置 chat 域 state（7 个）。
   // 不含 isLoading —— 原 handleSelectNode/handleSelectSession 也不重置
@@ -35,6 +40,8 @@ export function useChat() {
     setPermissionMode("");
     setPermissionDenials(null);
     setTaskProgress(null);
+    setIsHistoryLoading(false);
+    rawHistoryBufferRef.current = [];
   }, []);
 
   return {
@@ -54,6 +61,9 @@ export function useChat() {
     setPermissionDenials,
     tokenUsage,
     setTokenUsage,
+    isHistoryLoading,
+    setIsHistoryLoading,
+    rawHistoryBufferRef,
     currentAssistantMessageRef,
     resetForSessionChange,
   };

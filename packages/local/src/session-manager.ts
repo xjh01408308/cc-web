@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { SessionRunner } from './sdk-runner.js';
 import type { StreamResponse, SessionInfo, ProjectInfo, LocalEvent } from './types.js';
-import { LocalEventType } from './types.js';
+import { LocalEventType, HISTORY_PAGE_SIZE } from './types.js';
 import * as db from './db.js';
 import { validateProjectPath } from './file-utils.js';
 import { WORKSPACE_ROOT, FORCE_PERMISSION_MODE } from './config.js';
@@ -210,6 +210,38 @@ export function getHistory(sessionId: string): StreamResponse[] | undefined {
   const session = sessions.get(sessionId);
   if (session) return session.messages;
   return loadMessages(sessionId);
+}
+
+export interface HistoryPage {
+  messages: StreamResponse[];
+  hasMore: boolean;
+  nextBefore?: number;
+}
+
+/**
+ * 分页取单个会话历史（从最近往前，配合前端逐步刷新）。
+ * - before 省略：取最近 limit 条（首页）
+ * - before=N：取下标 [N-limit, N)（更早的一页）
+ * 返回 hasMore + nextBefore 供浏览器续拉。
+ *
+ * 注：非活跃会话每次调用都 loadMessages 全量读文件——已知次优；
+ * 活跃会话命中内存 sessions map 无此开销。若实测非活跃大会话分页慢，再加 LRU 缓存。
+ */
+export function getHistoryPage(
+  sessionId: string,
+  limit: number = HISTORY_PAGE_SIZE,
+  before?: number,
+): HistoryPage {
+  const all = getHistory(sessionId) || [];
+  const total = all.length;
+  // before 来自上页 nextBefore；消息可能被删致 total 缩小，clamp 防越界返回空页
+  const end = Math.min(before ?? total, total);
+  const start = Math.max(0, end - limit);
+  return {
+    messages: all.slice(start, end),
+    hasMore: start > 0,
+    nextBefore: start > 0 ? start : undefined,
+  };
 }
 
 function isSdkResult(resp: StreamResponse): boolean {

@@ -24,9 +24,11 @@ import {
 interface ChatMessagesProps {
   messages: AllMessage[];
   isLoading: boolean;
+  /** 历史分页加载中（顶部显示"加载更早的历史"提示） */
+  isHistoryLoading?: boolean;
 }
 
-export function ChatMessages({ messages, isLoading }: ChatMessagesProps) {
+export function ChatMessages({ messages, isLoading, isHistoryLoading }: ChatMessagesProps) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
 
@@ -63,9 +65,21 @@ export function ChatMessages({ messages, isLoading }: ChatMessagesProps) {
     if (isLoading) scrollToBottom(true);
   }, [isLoading]);
 
+  // 预计算稳定 key：type+timestamp+同组出现次号。不用数组 index——分页 prepend 更早
+  // 历史时 index 会变，导致已渲染消息重 mount（Markdown 重渲染 → 闪烁）。
+  // 同组次号由 processor 输出顺序决定，prepend 不影响（新页 timestamp 不同，不进同组）。
+  const messageKeys = (() => {
+    const counters = new Map<string, number>();
+    return messages.map((m) => {
+      const base = `${m.type}-${m.timestamp}`;
+      const n = counters.get(base) ?? 0;
+      counters.set(base, n + 1);
+      return `${base}-${n}`;
+    });
+  })();
+
   const renderMessage = (message: AllMessage, index: number) => {
-    // Use timestamp as key for stable rendering, fallback to index if needed
-    const key = `${message.timestamp}-${index}`;
+    const key = messageKeys[index];
 
     if (isSystemMessage(message)) {
       return <SystemMessageComponent key={key} message={message} />;
@@ -96,6 +110,14 @@ export function ChatMessages({ messages, isLoading }: ChatMessagesProps) {
       ) : (
         <>
           <div className="flex-1" aria-hidden="true"></div>
+          {isHistoryLoading && (
+            <div className="flex justify-center py-2 text-xs text-slate-400 dark:text-slate-500">
+              <span className="inline-flex items-center gap-1.5">
+                <span className="inline-block w-3 h-3 border-2 border-slate-300 dark:border-slate-600 border-t-transparent rounded-full animate-spin" />
+                正在加载更早的历史…
+              </span>
+            </div>
+          )}
           {messages.map(renderMessage)}
           {isLoading && <LoadingComponent />}
           <div ref={messagesEndRef} />

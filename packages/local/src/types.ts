@@ -24,4 +24,4 @@ export type {
   LocalResponseEvent,
 } from '@cc-web/shared';
 
-export { LocalCommandType, LocalControlType, LocalEventType } from '@cc-web/shared';
+export { LocalCommandType, LocalControlType, LocalEventType, HISTORY_PAGE_SIZE } from '@cc-web/shared';
