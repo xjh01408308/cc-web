@@ -23,6 +23,10 @@ import type { StreamingContext } from "../hooks/streaming/useStreamParser";
 import { UnifiedMessageProcessor } from "../utils/UnifiedMessageProcessor";
 import { dedupConsecutiveAssistant } from "../utils/dedupMessages";
 
+// 历史分页自动续拉的页数上限：防 getHistoryPage 游标 bug 致无限续拉、buffer 内存爆。
+// 每页 HISTORY_PAGE_SIZE(50) 条，100 页 = 5000 条历史（足够覆盖超大会话的最近部分）。
+const MAX_HISTORY_PAGES = 100;
+
 // ---- 进度统计 / 浏览态形状（与 ChatView 内联类型对齐；T-B 时提取共享）----
 
 export interface TaskProgress {
@@ -95,6 +99,7 @@ export interface DispatchContext {
   send: (cmd: BrowserCommand) => void;
   setIsHistoryLoading: Dispatch<SetStateAction<boolean>>;
   rawHistoryBufferRef: MutableRefObject<Record<string, unknown>[]>;
+  historyPageCountRef: MutableRefObject<number>;
 
   // 模型 / 权限 / 进度 setter
   setModel: Dispatch<SetStateAction<string>>;
@@ -336,8 +341,10 @@ function handleHistory(event: HistoryEvent, ctx: DispatchContext): void {
   // buffer 空（空会话 / 本页全非 claude_json）→ 不调 setMessages，保持现状
   // （切会话时 resetForSessionChange 已清空 messages）。
 
-  // 自动续拉更早的历史；hasMore=false（或旧协议无分页字段）时停止并关闭加载指示。
-  if (event.hasMore && event.nextBefore != null) {
+  // 自动续拉更早的历史；hasMore=false（或旧协议无分页字段）或达页数上限时停止。
+  // 上限防 getHistoryPage 游标 bug 致无限续拉 / buffer 内存爆。
+  ctx.historyPageCountRef.current += 1;
+  if (event.hasMore && event.nextBefore != null && ctx.historyPageCountRef.current < MAX_HISTORY_PAGES) {
     ctx.send({
       type: BrowserCommandType.GetHistory,
       sessionId: sid,

@@ -28,6 +28,8 @@ export function useChat() {
   // 历史分页缓冲区：按时间正序（最早..最近）累积已收到的原始消息；
   // 每页（更早的历史）prepend 到头部，dispatcher 据此整体重跑 processor。
   const rawHistoryBufferRef = useRef<Record<string, unknown>[]>([]);
+  // 已加载的历史页数（dispatcher 续拉上限计数，防游标 bug 致无限拉取 / buffer 内存爆）
+  const historyPageCountRef = useRef(0);
 
   // 切换会话/节点时重置 chat 域 state（7 个）。
   // 不含 isLoading —— 原 handleSelectNode/handleSelectSession 也不重置
@@ -42,6 +44,7 @@ export function useChat() {
     setTaskProgress(null);
     setIsHistoryLoading(false);
     rawHistoryBufferRef.current = [];
+    historyPageCountRef.current = 0;
   }, []);
 
   return {
@@ -64,6 +67,7 @@ export function useChat() {
     isHistoryLoading,
     setIsHistoryLoading,
     rawHistoryBufferRef,
+    historyPageCountRef,
     currentAssistantMessageRef,
     resetForSessionChange,
   };
