@@ -51,7 +51,7 @@
 三种部署场景：
 
 ```
-一体机 (restart.sh)          云服务 (restart-cloud.sh)      本地节点 (restart-local.sh)
+一体机 (restart.sh)          云服务 (npm run deploy)         本地节点 (restart-local.sh)
 ┌──────────────────┐       ┌──────────────────┐         ┌──────────────────┐
 │ relay :3001      │       │ nginx :443 (TLS) │         │                  │
 │ local (WS客户端)  │       │ relay :3001      │   wss   │ local (WS客户端)  │
@@ -132,9 +132,8 @@ restart.bat
 #    NODE_ENV=production
 #    INITIAL_ADMIN_PASSWORD=<管理员密码>
 
-# 2. 构建前端 & 启动
-npm run build:frontend
-./restart-cloud.sh
+# 2. 一键部署（构建前端 + 上传 + 启动 relay，详见下文「部署到云服务器」）
+npm run deploy
 
 # 3. 浏览器登录 admin 后，到 /admin 预注册 Node 获得 (NODE_ID, NODE_SECRET)
 #    （供下一步配置到远程 local）
@@ -177,7 +176,6 @@ sudo nginx -t && sudo systemctl reload nginx
 |------|------|
 | `npm install` | 安装所有 workspaces 依赖 |
 | `./restart.sh` | 一体机重启：relay + local + frontend |
-| `./restart-cloud.sh` | 云服务重启：relay + frontend |
 | `./restart-local.sh` | 本地节点重启：local only |
 | `npm run dev:relay` | 单独启动中转服务 (默认 :3001) |
 | `npm run dev:local` | 单独启动本地服务 |
@@ -344,7 +342,7 @@ data/sessions/
    ```
    自动完成：构建前端 → 打 tar → 上传 → 停旧 relay + 备份 `.env`/`data` → 清旧代码 + 解压 + 装依赖 → 起新 relay。
 
-   首次会 `pkill` 掉旧的 `restart-cloud.sh` 跑的 relay、由新 tsx 进程接管；nginx / 证书 / `cc-web.conf` 不动。
+   首次会 `pkill` 掉旧的 relay 进程、由新 tsx 进程接管；nginx / 证书 / `cc-web.conf` 不动。
 
 3. 浏览器开 `https://<DEPLOY_HOST>` 登录验证。
 
