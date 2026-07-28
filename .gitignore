@@ -17,3 +17,4 @@ crystalline-humming-sedgewick.md
 # 打包部署（本地构建产物与部署配置）
 .env.deploy
 cc-web.tar.gz
+cc-web-local.tar.gz
