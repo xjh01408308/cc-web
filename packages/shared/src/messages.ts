@@ -168,10 +168,17 @@ export interface BrowserGetFileContentCommand {
   nodeId?: string;
 }
 
+/** get_history 默认每页条数（请求方不传 limit 时 local 用此值） */
+export const HISTORY_PAGE_SIZE = 50;
+
 export interface BrowserGetHistoryCommand {
   type: typeof BrowserCommandType.GetHistory;
   sessionId: string;
   nodeId?: string;
+  /** 单页条数（默认 HISTORY_PAGE_SIZE）；省略时 local 取默认 */
+  limit?: number;
+  /** 数组下标上界(exclusive)，省略=取最近一页；续拉时由上页 nextBefore 传入 */
+  before?: number;
 }
 
 export type BrowserCommand =
@@ -298,6 +305,10 @@ export interface LocalGetFileContentCommand extends RequestEnvelope {
 export interface LocalGetHistoryCommand extends RequestEnvelope {
   type: typeof LocalCommandType.GetHistory;
   sessionId: string;
+  /** 单页条数（默认 HISTORY_PAGE_SIZE） */
+  limit?: number;
+  /** 数组下标上界(exclusive)，省略=取最近一页 */
+  before?: number;
 }
 
 export type LocalCommand =
@@ -453,13 +464,18 @@ export interface LocalFileContentEvent {
   _reqId?: string;
 }
 
-/** 单会话历史消息响应（get_history）：列表只回元数据，历史点击时按需拉取。 */
+/** 单会话历史消息响应（get_history）：列表只回元数据，历史点击时按需拉取。
+ *  分页：每页回 hasMore + nextBefore，浏览器据此续拉更早的历史。 */
 export interface LocalHistoryEvent {
   type: typeof LocalEventType.History;
   sessionId: string;
   messages: StreamResponse[];
   model?: string;
   permissionMode?: string;
+  /** 是否还有更早的历史（分页；不分页时省略，消费端视同 false） */
+  hasMore?: boolean;
+  /** 下一页游标（hasMore=true 时给，= 本页起始下标） */
+  nextBefore?: number;
   _reqId?: string;
 }
 
@@ -611,13 +627,18 @@ export interface BrowserFileContentEvent {
   nodeId?: string;
 }
 
-/** 单会话历史消息（get_history 响应）：dispatcher 据sessionId匹配当前活跃会话后恢复 messages。 */
+/** 单会话历史消息（get_history 响应）：dispatcher 据sessionId匹配当前活跃会话后恢复 messages。
+ *  分页：每页回 hasMore + nextBefore，浏览器据此续拉更早的历史。 */
 export interface BrowserHistoryEvent {
   type: typeof BrowserEventType.History;
   sessionId: string;
   messages: StreamResponse[];
   model?: string;
   permissionMode?: string;
+  /** 是否还有更早的历史（分页；不分页时省略，消费端视同 false） */
+  hasMore?: boolean;
+  /** 下一页游标（hasMore=true 时给，= 本页起始下标） */
+  nextBefore?: number;
   nodeId?: string;
 }
 

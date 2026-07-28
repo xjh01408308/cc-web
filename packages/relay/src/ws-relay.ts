@@ -217,7 +217,7 @@ export class ConnectionHandler {
       case BrowserCommandType.GetHistory: {
         const conn = this.resolveAuthedTarget(ws, msg.nodeId, { noSelectionError: '未选择节点' });
         if (!conn) return;
-        this.send(conn.ws, { type: LocalCommandType.GetHistory, sessionId: msg.sessionId, _reqId: this.matcher.registerBrowser(ws, 'get_history', BROWSER_REQUEST_TIMEOUT_MS) });
+        this.send(conn.ws, { type: LocalCommandType.GetHistory, sessionId: msg.sessionId, limit: msg.limit, before: msg.before, _reqId: this.matcher.registerBrowser(ws, 'get_history', BROWSER_REQUEST_TIMEOUT_MS) });
         break;
       }
 
