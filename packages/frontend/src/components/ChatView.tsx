@@ -87,6 +87,7 @@ export function ChatView() {
     tokenUsage, setTokenUsage,
     isHistoryLoading, setIsHistoryLoading,
     rawHistoryBufferRef,
+    historyPageCountRef,
     currentAssistantMessageRef,
     resetForSessionChange,
   } = useChat();
@@ -250,6 +251,7 @@ export function ChatView() {
             send,
             setIsHistoryLoading,
             rawHistoryBufferRef,
+            historyPageCountRef,
             setModel,
             setPermissionMode,
             setHasReceivedInit,

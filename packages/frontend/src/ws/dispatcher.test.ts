@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { dispatchBrowserEvent } from "./dispatcher";
 import type { DispatchContext } from "./dispatcher";
-import { BrowserEventType } from "../types";
+import { BrowserEventType, BrowserCommandType } from "../types";
 import type { BrowserEvent } from "../types";
 
 // ---- mock context 工厂 ----
@@ -28,6 +28,7 @@ function createMockContext(overrides: object = {}) {
     send: vi.fn(),
     setIsHistoryLoading: vi.fn(),
     rawHistoryBufferRef: { current: [] },
+    historyPageCountRef: { current: 0 },
     setModel: vi.fn(),
     setPermissionMode: vi.fn(),
     setHasReceivedInit: vi.fn(),
@@ -333,6 +334,47 @@ describe("dispatchBrowserEvent — History（按需历史恢复）", () => {
     );
     expect(ctx.setMessages).not.toHaveBeenCalled();
     expect(ctx.setHasReceivedInit).not.toHaveBeenCalled();
+  });
+
+  it("hasMore=true 且未达上限 → 自动续拉更早历史（before=nextBefore）+ pageCount 递增", () => {
+    const ctx = createMockContext({ activeSessionId: "s1", activeNodeId: "n1" });
+    dispatchBrowserEvent(
+      ev({
+        type: BrowserEventType.History,
+        sessionId: "s1",
+        messages: [
+          { type: "claude_json", data: { type: "user", message: { role: "user", content: "hi" } } },
+        ],
+        hasMore: true,
+        nextBefore: 50,
+      }),
+      ctx,
+    );
+    expect(ctx.historyPageCountRef.current).toBe(1);
+    expect(ctx.send).toHaveBeenCalledWith(expect.objectContaining({
+      type: BrowserCommandType.GetHistory,
+      sessionId: "s1",
+      nodeId: "n1",
+      before: 50,
+    }));
+  });
+
+  it("续拉达 MAX_HISTORY_PAGES 上限 → 停止续拉 + 关闭加载指示（防游标 bug 致无限拉取/内存爆）", () => {
+    const ctx = createMockContext({ activeSessionId: "s1", historyPageCountRef: { current: 9999 } });
+    dispatchBrowserEvent(
+      ev({
+        type: BrowserEventType.History,
+        sessionId: "s1",
+        messages: [
+          { type: "claude_json", data: { type: "user", message: { role: "user", content: "hi" } } },
+        ],
+        hasMore: true,
+        nextBefore: 10,
+      }),
+      ctx,
+    );
+    expect(ctx.send).not.toHaveBeenCalled();
+    expect(ctx.setIsHistoryLoading).toHaveBeenCalledWith(false);
   });
 
   it("sessionId === pending（即使 active 为 null）→ 恢复（初始 WS 兜底场景）", () => {
